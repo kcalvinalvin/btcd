@@ -14,11 +14,11 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/database"
 	"github.com/btcsuite/btcd/database/internal/treap"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcd/btcutil"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/comparer"
 	ldberrors "github.com/syndtr/goleveldb/leveldb/errors"
@@ -1896,6 +1896,22 @@ func (db *db) Update(fn func(database.Tx) error) error {
 	}
 
 	return tx.Commit()
+}
+
+// Flush flushes the pending data in the cache to the disk.
+//
+// This function is part of the database.DB interface implementation.
+func (db *db) Flush() error {
+	// Since all transactions have a read lock on this mutex, this will
+	// cause Close to wait for all readers to complete.
+	db.closeLock.Lock()
+	defer db.closeLock.Unlock()
+
+	if db.closed {
+		return makeDbErr(database.ErrDbNotOpen, errDbNotOpenStr, nil)
+	}
+
+	return db.cache.flush()
 }
 
 // Close cleanly shuts down the database and syncs all data.  It will block
