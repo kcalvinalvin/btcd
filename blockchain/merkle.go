@@ -86,7 +86,7 @@ func HashMerkleBranches(left *chainhash.Hash, right *chainhash.Hash) *chainhash.
 //
 // The above stored as a linear array is as follows:
 //
-// 	[h1 h2 h3 h4 h12 h34 root]
+//	[h1 h2 h3 h4 h12 h34 root]
 //
 // As the above shows, the merkle root is always the last element in the array.
 //
@@ -152,6 +152,61 @@ func BuildMerkleTreeStore(transactions []*btcutil.Tx, witness bool) []*chainhash
 	}
 
 	return merkles
+}
+
+// CalcMerkleRoot computes the merkle root over a set of hashed leaves. The
+// interior nodes are computed opportunistically as the leaves are added to the
+// abstract tree to reduce the total number of allocations. Throughout the
+// computation, this computation only requires storing O(log n) interior
+// nodes.
+//
+// This method differs from BuildMerkleTreeStore in that the interior nodes are
+// discarded instead of being returned along with the root. CalcMerkleRoot is
+// slightly slower than BuildMerkleTreeStore, but requires significantly less
+// memory and fewer allocations.
+//
+// A merkle tree is a tree in which every non-leaf node is the hash of its
+// children nodes. A diagram depicting how this works for bitcoin transactions
+// where h(x) is a double sha256 follows:
+//
+//	         root = h1234 = h(h12 + h34)
+//	        /                           \
+//	  h12 = h(h1 + h2)            h34 = h(h3 + h4)
+//	   /            \              /            \
+//	h1 = h(tx1)  h2 = h(tx2)    h3 = h(tx3)  h4 = h(tx4)
+//
+// The additional bool parameter indicates if we are generating the merkle tree
+// using witness transaction id's rather than regular transaction id's. This
+// also presents an additional case wherein the wtxid of the coinbase transaction
+// is the zeroHash.
+func CalcMerkleRoot(transactions []*btcutil.Tx, witness bool) chainhash.Hash {
+	// Iteratively push the leaves onto the rolling merkle tree.
+	merkle := NewStump(len(transactions))
+	for i, tx := range transactions {
+		// If we're computing a witness merkle root, instead of the
+		// regular txid, we use the modified wtxid which includes a
+		// transaction's witness data within the digest. Additionally,
+		// the coinbase's wtxid is all zeroes.
+		switch {
+		case witness && i == 0:
+			var zeroHash chainhash.Hash
+			merkle.add(zeroHash)
+		case witness:
+			wSha := tx.MsgTx().WitnessHash()
+			merkle.add(wSha)
+		default:
+			hash := tx.Hash()
+			merkle.add(*hash)
+		}
+	}
+
+	if len(transactions) != 1 && len(transactions)%2 != 0 {
+		tx := transactions[len(transactions)-1]
+		hash := tx.Hash()
+		merkle.add(*hash)
+	}
+
+	return merkle.Roots[0]
 }
 
 // ExtractWitnessCommitment attempts to locate, and return the witness
