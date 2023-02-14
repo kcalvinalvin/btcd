@@ -829,7 +829,7 @@ func (b *BlockChain) checkBlockContext(block *btcutil.Block, prevNode *blockNode
 // http://r6.ca/blog/20120206T005236Z.html.
 //
 // This function MUST be called with the chain state lock held (for reads).
-func (b *BlockChain) checkBIP0030(node *blockNode, block *btcutil.Block, view *UtxoViewpoint) error {
+func (b *BlockChain) checkBIP0030(block *btcutil.Block, view *UtxoViewpoint) error {
 	// Fetch utxos for all of the transaction ouputs in this block.
 	// Typically, there will not be any utxos for any of the outputs.
 	fetchSet := make(map[wire.OutPoint]struct{})
@@ -1024,7 +1024,7 @@ func (b *BlockChain) checkConnectBlock(node *blockNode, block *btcutil.Block, vi
 	// BIP0030 check is expensive since it involves a ton of cache misses in
 	// the utxoset.
 	if !isBIP0030Node(node) && (node.height < b.chainParams.BIP0034Height) {
-		err := b.checkBIP0030(node, block, view)
+		err := b.checkBIP0030(block, view)
 		if err != nil {
 			return err
 		}
