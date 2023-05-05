@@ -604,15 +604,13 @@ func BenchmarkTxHash(b *testing.B) {
 // BenchmarkDoubleHashB performs a benchmark on how long it takes to perform a
 // double hash returning a byte slice.
 func BenchmarkDoubleHashB(b *testing.B) {
-	var buf bytes.Buffer
-	if err := genesisCoinbaseTx.Serialize(&buf); err != nil {
-		b.Errorf("Serialize: unexpected error: %v", err)
-		return
-	}
-	txBytes := buf.Bytes()
-
-	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		var buf bytes.Buffer
+		if err := genesisCoinbaseTx.Serialize(&buf); err != nil {
+			b.Fatalf("Serialize: unexpected error: %v", err)
+		}
+		txBytes := buf.Bytes()
+
 		_ = chainhash.DoubleHashB(txBytes)
 	}
 }
@@ -620,15 +618,22 @@ func BenchmarkDoubleHashB(b *testing.B) {
 // BenchmarkDoubleHashH performs a benchmark on how long it takes to perform
 // a double hash returning a chainhash.Hash.
 func BenchmarkDoubleHashH(b *testing.B) {
-	var buf bytes.Buffer
-	if err := genesisCoinbaseTx.Serialize(&buf); err != nil {
-		b.Errorf("Serialize: unexpected error: %v", err)
-		return
-	}
-	txBytes := buf.Bytes()
-
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		var buf bytes.Buffer
+		if err := genesisCoinbaseTx.Serialize(&buf); err != nil {
+			b.Fatalf("Serialize: unexpected error: %v", err)
+		}
+		txBytes := buf.Bytes()
+
 		_ = chainhash.DoubleHashH(txBytes)
+	}
+}
+
+// BenchmarkDoubleHashRaw performs a benchmark on how long it takes to perform
+// a double hash returning a byte slice.
+func BenchmarkDoubleHashRaw(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = chainhash.DoubleHashRaw(genesisCoinbaseTx.Serialize)
 	}
 }
