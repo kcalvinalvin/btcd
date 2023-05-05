@@ -14,3 +14,5 @@ require (
 )
 
 replace github.com/btcsuite/btcd => ../
+
+replace github.com/btcsuite/btcd/chaincfg/chainhash => ../chaincfg/chainhash

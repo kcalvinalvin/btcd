@@ -5,7 +5,6 @@
 package wire
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"strconv"
@@ -332,13 +331,7 @@ func (msg *MsgTx) AddTxOut(to *TxOut) {
 
 // TxHash generates the Hash for the transaction.
 func (msg *MsgTx) TxHash() chainhash.Hash {
-	// Encode the transaction and calculate double sha256 on the result.
-	// Ignore the error returns since the only way the encode could fail
-	// is being out of memory or due to nil pointers, both of which would
-	// cause a run-time panic.
-	buf := bytes.NewBuffer(make([]byte, 0, msg.SerializeSizeStripped()))
-	_ = msg.SerializeNoWitness(buf)
-	return chainhash.DoubleHashH(buf.Bytes())
+	return chainhash.DoubleHashRaw(msg.SerializeNoWitness)
 }
 
 // WitnessHash generates the hash of the transaction serialized according to
@@ -348,9 +341,7 @@ func (msg *MsgTx) TxHash() chainhash.Hash {
 // is the same as its txid.
 func (msg *MsgTx) WitnessHash() chainhash.Hash {
 	if msg.HasWitness() {
-		buf := bytes.NewBuffer(make([]byte, 0, msg.SerializeSize()))
-		_ = msg.Serialize(buf)
-		return chainhash.DoubleHashH(buf.Bytes())
+		return chainhash.DoubleHashRaw(msg.Serialize)
 	}
 
 	return msg.TxHash()
