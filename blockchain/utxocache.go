@@ -5,6 +5,7 @@
 package blockchain
 
 import (
+	"container/list"
 	"fmt"
 	"time"
 
@@ -586,6 +587,125 @@ func (s *utxoCache) Flush(mode FlushMode, bestState *BestState) error {
 	if s.totalMemoryUsage() >= threshold {
 		return s.flush(bestState)
 	}
+
+	return nil
+}
+
+// InitConsistentState checks the consistency status of the utxo state and
+// replays blocks if it lags behind the best state of the blockchain.
+//
+// It needs to be ensured that the chainView passed to this method does not
+// get changed during the execution of this method.
+func (b *BlockChain) InitConsistentState(tip *blockNode, interrupt <-chan struct{}) error {
+	s := b.utxoCache
+	// Load the consistency status from the database.
+	var statusBytes []byte
+	s.db.View(func(dbTx database.Tx) error {
+		statusBytes = dbFetchUtxoStateConsistency(dbTx)
+		return nil
+	})
+
+	// If no status was found, the database is old and didn't have a cached utxo
+	// state yet. In that case, we set the status to the best state and write
+	// this to the database.
+	if statusBytes == nil {
+		err := s.db.Update(func(dbTx database.Tx) error {
+			return dbPutUtxoStateConsistency(dbTx, &tip.hash)
+		})
+
+		// Set the last flush hash as it's the default value of 0s.
+		s.lastFlushHash = tip.hash
+
+		return err
+	}
+
+	statusHash, err := chainhash.NewHash(statusBytes)
+	if err != nil {
+		return err
+	}
+
+	// If state is consistent, we are done.
+	if *statusHash == tip.hash {
+		log.Debugf("UTXO state consistent at (%d:%v)", tip.height, tip.hash)
+
+		// The last flush hash is set to the default value of all 0s. Set
+		// it to the tip since we checked it's consistent.
+		s.lastFlushHash = tip.hash
+
+		return nil
+	}
+
+	lastFlushNode := b.index.LookupNode(statusHash)
+	log.Infof("Reconstructing UTXO state after an unclean shutdown. The UTXO state is "+
+		"consistent at block %s (%d) but the chainstate is at block %s (%d),  This may "+
+		"take a long time...", statusHash.String(), lastFlushNode.height,
+		tip.hash.String(), tip.height)
+
+	// Even though this should always be true, make sure the fetched hash is in
+	// the best chain.
+	fork := b.bestChain.FindFork(lastFlushNode)
+	if fork == nil {
+		return AssertError(fmt.Sprintf("last utxo consistency status contains "+
+			"hash that is not in best chain: %v", statusHash))
+	}
+
+	// We never disconnect blocks as they cannot be inconsistent during a reorganization.
+	// This is because The cache is flushed before the reorganization begins and the utxo
+	// set at each block disconnect is written atomically to the database.
+	node := lastFlushNode
+
+	// We replay the blocks from the last consistent state up to the best
+	// state. Iterate forward from the consistent node to the tip of the best
+	// chain.
+	attachNodes := list.New()
+	for n := tip; n.height >= 0; n = n.parent {
+		if n == fork {
+			break
+		}
+		attachNodes.PushFront(n)
+	}
+
+	for e := attachNodes.Front(); e != nil; e = e.Next() {
+		node = e.Value.(*blockNode)
+
+		var block *btcutil.Block
+		err := s.db.View(func(dbTx database.Tx) error {
+			block, err = dbFetchBlockByNode(dbTx, node)
+			if err != nil {
+				return err
+			}
+
+			return err
+		})
+		if err != nil {
+			return err
+		}
+
+		err = b.utxoCache.connectTransactions(block, nil)
+		if err != nil {
+			return err
+		}
+
+		// Flush the utxo cache if needed.  This will in turn update the
+		// consistent state to this block.
+		if s.totalMemoryUsage() >= s.maxTotalMemoryUsage {
+			err = s.flush(&BestState{Hash: node.hash, Height: node.height})
+			if err != nil {
+				return err
+			}
+		}
+
+		if interruptRequested(interrupt) {
+			log.Warn("UTXO state reconstruction interrupted")
+
+			return errInterruptRequested
+		}
+	}
+	log.Debug("UTXO state reconstruction done")
+
+	// Set the last flush hash as it's the default value of 0s.
+	s.lastFlushHash = tip.hash
+	s.lastFlushTime = time.Now()
 
 	return nil
 }
