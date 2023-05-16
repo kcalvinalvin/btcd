@@ -8,8 +8,8 @@
 package database
 
 import (
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 )
 
 // Cursor represents a cursor over key/value pairs and nested buckets of a
@@ -458,6 +458,9 @@ type DB interface {
 	// Calling Rollback or Commit on the transaction passed to the
 	// user-supplied function will result in a panic.
 	Update(fn func(tx Tx) error) error
+
+	// Flush flushes all pending data to the disk.
+	Flush() error
 
 	// Close cleanly shuts down the database and syncs all data.  It will
 	// block until all database transactions have been finalized (rolled

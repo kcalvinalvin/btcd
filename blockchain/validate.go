@@ -58,6 +58,16 @@ var (
 	// set forth in BIP0030.  It is defined as a package level variable to
 	// avoid the need to create a new instance every time a check is needed.
 	block91880Hash = newHashFromStr("00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721")
+
+	// tx91722OutPoint is one of the two utxos that were overwritten before
+	// BIP0030 was enforced.  It is defined as a package level variable to
+	// avoid the need to create a new instance every time a check is needed.
+	tx91722OutPoint = wire.OutPoint{Hash: *newHashFromStr("e3bf3d07d4b0375638d5f1db5255fe07ba2c4cb067cd81b84ee974b6585fb468"), Index: 0}
+
+	// tx91812OutPoint is one of the two utxos that were overwritten before
+	// BIP0030 was enforced.  It is defined as a package level variable to
+	// avoid the need to create a new instance every time a check is needed.
+	tx91812OutPoint = wire.OutPoint{Hash: *newHashFromStr("d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599"), Index: 0}
 )
 
 // isNullOutpoint determines whether or not a previous transaction output point
@@ -840,7 +850,7 @@ func (b *BlockChain) checkBIP0030(node *blockNode, block *btcutil.Block, view *U
 			fetch = append(fetch, prevOut)
 		}
 	}
-	err := view.fetchUtxos(b.db, fetch)
+	err := view.fetchUtxos(b.utxoCache, fetch)
 	if err != nil {
 		return err
 	}
@@ -1031,11 +1041,11 @@ func (b *BlockChain) checkConnectBlock(node *blockNode, block *btcutil.Block, vi
 	}
 
 	// Load all of the utxos referenced by the inputs for all transactions
-	// in the block don't already exist in the utxo view from the database.
+	// in the block don't already exist in the utxo view from the cache.
 	//
 	// These utxo entries are needed for verification of things such as
 	// transaction inputs, counting pay-to-script-hashes, and scripts.
-	err := view.fetchInputUtxos(b.db, block)
+	err := view.fetchInputUtxos(b.utxoCache, block)
 	if err != nil {
 		return err
 	}
