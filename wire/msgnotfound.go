@@ -5,6 +5,7 @@
 package wire
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 )
@@ -34,7 +35,8 @@ func (msg *MsgNotFound) AddInvVect(iv *InvVect) error {
 
 // BtcDecode decodes r using the bitcoin protocol encoding into the receiver.
 // This is part of the Message interface implementation.
-func (msg *MsgNotFound) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) error {
+func (msg *MsgNotFound) BtcDecode(buf []byte, pver uint32, enc MessageEncoding) error {
+	r := bytes.NewBuffer(buf)
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
 		return err

@@ -50,7 +50,7 @@ func TestFeeFilterLatest(t *testing.T) {
 
 	// Test decode with latest protocol version.
 	readmsg := NewMsgFeeFilter(0)
-	err = readmsg.BtcDecode(&buf, pver, BaseEncoding)
+	err = readmsg.BtcDecode(buf.Bytes(), pver, BaseEncoding)
 	if err != nil {
 		t.Errorf("decode of MsgFeeFilter failed [%v] err <%v>", buf, err)
 	}
@@ -104,8 +104,7 @@ func TestFeeFilterWire(t *testing.T) {
 
 		// Decode the message from wire format.
 		var msg MsgFeeFilter
-		rbuf := bytes.NewReader(test.buf)
-		err = msg.BtcDecode(rbuf, test.pver, BaseEncoding)
+		err = msg.BtcDecode(test.buf, test.pver, BaseEncoding)
 		if err != nil {
 			t.Errorf("BtcDecode #%d error %v", i, err)
 			continue
@@ -168,8 +167,7 @@ func TestFeeFilterWireErrors(t *testing.T) {
 
 		// Decode from wire format.
 		var msg MsgFeeFilter
-		r := newFixedReader(test.max, test.buf)
-		err = msg.BtcDecode(r, test.pver, BaseEncoding)
+		err = msg.BtcDecode(test.buf[:test.max], test.pver, BaseEncoding)
 		if reflect.TypeOf(err) != reflect.TypeOf(test.readErr) {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)

@@ -17,7 +17,7 @@ type MsgVerAck struct{}
 
 // BtcDecode decodes r using the bitcoin protocol encoding into the receiver.
 // This is part of the Message interface implementation.
-func (msg *MsgVerAck) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) error {
+func (msg *MsgVerAck) BtcDecode(buf []byte, pver uint32, enc MessageEncoding) error {
 	return nil
 }
 

@@ -76,20 +76,16 @@ func (msg *MsgVersion) AddService(service ServiceFlag) {
 // *bytes.Buffer so the number of remaining bytes can be ascertained.
 //
 // This is part of the Message interface implementation.
-func (msg *MsgVersion) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) error {
-	buf, ok := r.(*bytes.Buffer)
-	if !ok {
-		return fmt.Errorf("MsgVersion.BtcDecode reader is not a " +
-			"*bytes.Buffer")
-	}
+func (msg *MsgVersion) BtcDecode(buf []byte, pver uint32, enc MessageEncoding) error {
+	r := bytes.NewBuffer(buf)
 
-	err := readElements(buf, &msg.ProtocolVersion, &msg.Services,
+	err := readElements(r, &msg.ProtocolVersion, &msg.Services,
 		(*int64Time)(&msg.Timestamp))
 	if err != nil {
 		return err
 	}
 
-	err = readNetAddress(buf, pver, &msg.AddrYou, false)
+	err = readNetAddress(r, pver, &msg.AddrYou, false)
 	if err != nil {
 		return err
 	}
@@ -97,20 +93,20 @@ func (msg *MsgVersion) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) 
 	// Protocol versions >= 106 added a from address, nonce, and user agent
 	// field and they are only considered present if there are bytes
 	// remaining in the message.
-	if buf.Len() > 0 {
-		err = readNetAddress(buf, pver, &msg.AddrMe, false)
+	if r.Len() > 0 {
+		err = readNetAddress(r, pver, &msg.AddrMe, false)
 		if err != nil {
 			return err
 		}
 	}
-	if buf.Len() > 0 {
-		err = readElement(buf, &msg.Nonce)
+	if r.Len() > 0 {
+		err = readElement(r, &msg.Nonce)
 		if err != nil {
 			return err
 		}
 	}
-	if buf.Len() > 0 {
-		userAgent, err := ReadVarString(buf, pver)
+	if r.Len() > 0 {
+		userAgent, err := ReadVarString(r, pver)
 		if err != nil {
 			return err
 		}
@@ -123,8 +119,8 @@ func (msg *MsgVersion) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) 
 
 	// Protocol versions >= 209 added a last known block field.  It is only
 	// considered present if there are bytes remaining in the message.
-	if buf.Len() > 0 {
-		err = readElement(buf, &msg.LastBlock)
+	if r.Len() > 0 {
+		err = readElement(r, &msg.LastBlock)
 		if err != nil {
 			return err
 		}
@@ -133,8 +129,8 @@ func (msg *MsgVersion) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) 
 	// There was no relay transactions field before BIP0037Version, but
 	// the default behavior prior to the addition of the field was to always
 	// relay transactions.
-	if buf.Len() > 0 {
-		// It's safe to ignore the error here since the buffer has at
+	if r.Len() > 0 {
+		// It's safe to ignore the error here since the rfer has at
 		// least one byte and that byte will result in a boolean value
 		// regardless of its value.  Also, the wire encoding for the
 		// field is true when transactions should be relayed, so reverse

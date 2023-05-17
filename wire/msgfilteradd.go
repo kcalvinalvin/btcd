@@ -5,6 +5,7 @@
 package wire
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 )
@@ -27,7 +28,8 @@ type MsgFilterAdd struct {
 
 // BtcDecode decodes r using the bitcoin protocol encoding into the receiver.
 // This is part of the Message interface implementation.
-func (msg *MsgFilterAdd) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) error {
+func (msg *MsgFilterAdd) BtcDecode(buf []byte, pver uint32, enc MessageEncoding) error {
+	r := bytes.NewBuffer(buf)
 	if pver < BIP0037Version {
 		str := fmt.Sprintf("filteradd message invalid for protocol "+
 			"version %d", pver)

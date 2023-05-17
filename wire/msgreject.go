@@ -5,6 +5,7 @@
 package wire
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 
@@ -73,7 +74,8 @@ type MsgReject struct {
 
 // BtcDecode decodes r using the bitcoin protocol encoding into the receiver.
 // This is part of the Message interface implementation.
-func (msg *MsgReject) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) error {
+func (msg *MsgReject) BtcDecode(buf []byte, pver uint32, enc MessageEncoding) error {
+	r := bytes.NewBuffer(buf)
 	if pver < RejectVersion {
 		str := fmt.Sprintf("reject message invalid for protocol "+
 			"version %d", pver)

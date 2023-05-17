@@ -186,6 +186,150 @@ type uint32Time time.Time
 // time.Time since it is otherwise ambiguous.
 type int64Time time.Time
 
+// readElementBytes reads the next sequence of bytes from r using little endian
+// depending on the concrete type of element pointed to.
+func readElementBytes(buf []byte, element interface{}) (int, error) {
+	// Attempt to read the element based on the concrete type via fast
+	// type assertions first.
+	switch e := element.(type) {
+	case *int32:
+		if len(buf) < 4 {
+			return 0, io.EOF
+		}
+		rv := littleEndian.Uint32(buf[:4])
+		*e = int32(rv)
+		return 4, nil
+
+	case *uint32:
+		if len(buf) < 4 {
+			return 0, io.EOF
+		}
+		rv := littleEndian.Uint32(buf[:4])
+		*e = rv
+		return 4, nil
+
+	case *int64:
+		if len(buf) < 8 {
+			return 0, io.EOF
+		}
+		rv := littleEndian.Uint64(buf[:8])
+		*e = int64(rv)
+		return 8, nil
+
+	case *uint64:
+		if len(buf) < 8 {
+			return 0, io.EOF
+		}
+		rv := littleEndian.Uint64(buf[:8])
+		*e = rv
+		return 8, nil
+
+	case *bool:
+		if len(buf) < 1 {
+			return 0, io.EOF
+		}
+
+		if buf[0] == 0x00 {
+			*e = false
+		} else {
+			*e = true
+		}
+		return 1, nil
+
+	// Unix timestamp encoded as a uint32.
+	case *uint32Time:
+		if len(buf) < 4 {
+			return 0, io.EOF
+		}
+		rv := littleEndian.Uint32(buf[:4])
+		*e = uint32Time(time.Unix(int64(rv), 0))
+		return 4, nil
+
+	// Unix timestamp encoded as an int64.
+	case *int64Time:
+		if len(buf) < 8 {
+			return 0, io.EOF
+		}
+		rv := littleEndian.Uint64(buf[:8])
+		*e = int64Time(time.Unix(int64(rv), 0))
+		return 8, nil
+
+	// Message header checksum.
+	case *[4]byte:
+		if len(buf) < 4 {
+			return 0, io.EOF
+		}
+		*e = *(*[4]byte)(buf[:4])
+		return 4, nil
+
+	// Message header command.
+	case *[CommandSize]uint8:
+		if len(buf) < CommandSize {
+			return 0, io.EOF
+		}
+		*e = *(*[CommandSize]byte)(buf[:CommandSize])
+		return CommandSize, nil
+
+	// IP address.
+	case *[16]byte:
+		if len(buf) < 16 {
+			return 0, io.EOF
+		}
+		*e = *(*[16]byte)(buf[:16])
+		return 16, nil
+
+	case *chainhash.Hash:
+		if len(buf) < chainhash.HashSize {
+			return 0, io.EOF
+		}
+		*e = *(*[chainhash.HashSize]byte)(buf[:chainhash.HashSize])
+		return chainhash.HashSize, nil
+
+	case *ServiceFlag:
+		if len(buf) < 8 {
+			return 0, io.EOF
+		}
+		rv := littleEndian.Uint64(buf[:8])
+		*e = ServiceFlag(rv)
+		return 8, nil
+
+	case *InvType:
+		if len(buf) < 4 {
+			return 0, io.EOF
+		}
+		rv := littleEndian.Uint32(buf[:4])
+		*e = InvType(rv)
+		return 4, nil
+
+	case *BitcoinNet:
+		if len(buf) < 4 {
+			return 0, io.EOF
+		}
+		rv := littleEndian.Uint32(buf[:4])
+		*e = BitcoinNet(rv)
+		return 4, nil
+
+	case *BloomUpdateType:
+		if len(buf) < 1 {
+			return 0, io.EOF
+		}
+		*e = BloomUpdateType(buf[0])
+		return 1, nil
+
+	case *RejectCode:
+		if len(buf) < 1 {
+			return 0, io.EOF
+		}
+		*e = RejectCode(buf[0])
+		return 1, nil
+	}
+
+	return 0, nil
+	//// Fall back to the slower binary.Read if a fast path was not available
+	//// above.
+	//return binary.Read(r, littleEndian, element)
+}
+
 // readElement reads the next sequence of bytes from r using little endian
 // depending on the concrete type of element pointed to.
 func readElement(r io.Reader, element interface{}) error {
@@ -333,6 +477,20 @@ func readElement(r io.Reader, element interface{}) error {
 
 // readElements reads multiple items from r.  It is equivalent to multiple
 // calls to readElement.
+func readElementsBytes(buf []byte, elements ...interface{}) (int, error) {
+	offset := 0
+	for _, element := range elements {
+		read, err := readElementBytes(buf[offset:], element)
+		if err != nil {
+			return offset, err
+		}
+		offset += read
+	}
+	return offset, nil
+}
+
+// readElements reads multiple items from r.  It is equivalent to multiple
+// calls to readElement.
 func readElements(r io.Reader, elements ...interface{}) error {
 	for _, element := range elements {
 		err := readElement(r, element)
@@ -470,6 +628,76 @@ func writeElements(w io.Writer, elements ...interface{}) error {
 		}
 	}
 	return nil
+}
+
+// ReadVarIntBytes reads a variable length integer from a byte slice and returns it as a uint64.
+func ReadVarIntBytes(r []byte, pver uint32) (uint64, int, error) {
+	if len(r) < 1 {
+		return 0, 0, io.EOF
+	}
+
+	offset := 0
+	discriminant := r[offset]
+	offset += 1
+	if offset >= len(r) {
+		return 0, 0, io.EOF
+	}
+
+	var rv uint64
+	switch discriminant {
+	case 0xff:
+		if len(r[offset:]) < 8 {
+			return 0, offset, io.EOF
+		}
+		rv := littleEndian.Uint64(r[offset : offset+8])
+		offset += 8
+
+		// The encoding is not canonical if the value could have been
+		// encoded using fewer bytes.
+		min := uint64(0x100000000)
+		if rv < min {
+			return 0, offset, messageError("ReadVarIntBytes", fmt.Sprintf(
+				errNonCanonicalVarInt, rv, discriminant, min))
+		}
+
+	case 0xfe:
+		if len(r[offset:]) < 4 {
+			return 0, offset, io.EOF
+		}
+		sv := littleEndian.Uint32(r[offset : offset+4])
+		offset += 4
+
+		rv = uint64(sv)
+
+		// The encoding is not canonical if the value could have been
+		// encoded using fewer bytes.
+		min := uint64(0x10000)
+		if rv < min {
+			return 0, offset, messageError("ReadVarIntBytes", fmt.Sprintf(
+				errNonCanonicalVarInt, rv, discriminant, min))
+		}
+
+	case 0xfd:
+		if len(r[offset:]) < 2 {
+			return 0, offset, io.EOF
+		}
+		sv := littleEndian.Uint16(r[offset : offset+2])
+		offset += 2
+		rv = uint64(sv)
+
+		// The encoding is not canonical if the value could have been
+		// encoded using fewer bytes.
+		min := uint64(0xfd)
+		if rv < min {
+			return 0, offset, messageError("ReadVarIntBytes", fmt.Sprintf(
+				errNonCanonicalVarInt, rv, discriminant, min))
+		}
+
+	default:
+		rv = uint64(discriminant)
+	}
+
+	return rv, offset, nil
 }
 
 // ReadVarInt reads a variable length integer from r and returns it as a uint64.
