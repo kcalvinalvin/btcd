@@ -246,8 +246,7 @@ func TestGetHeadersWire(t *testing.T) {
 
 		// Decode the message from wire format.
 		var msg MsgGetHeaders
-		rbuf := bytes.NewReader(test.buf)
-		err = msg.BtcDecode(rbuf, test.pver, test.enc)
+		err = msg.BtcDecode(test.buf, test.pver, test.enc)
 		if err != nil {
 			t.Errorf("BtcDecode #%d error %v", i, err)
 			continue
@@ -370,8 +369,7 @@ func TestGetHeadersWireErrors(t *testing.T) {
 
 		// Decode from wire format.
 		var msg MsgGetHeaders
-		r := newFixedReader(test.max, test.buf)
-		err = msg.BtcDecode(r, test.pver, test.enc)
+		err = msg.BtcDecode(test.buf[:test.max], test.pver, test.enc)
 		if reflect.TypeOf(err) != reflect.TypeOf(test.readErr) {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)

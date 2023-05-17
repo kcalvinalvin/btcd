@@ -186,8 +186,7 @@ func TestBlockWire(t *testing.T) {
 
 		// Decode the message from wire format.
 		var msg MsgBlock
-		rbuf := bytes.NewReader(test.buf)
-		err = msg.BtcDecode(rbuf, test.pver, test.enc)
+		err = msg.BtcDecode(test.buf, test.pver, test.enc)
 		if err != nil {
 			t.Errorf("BtcDecode #%d error %v", i, err)
 			continue
@@ -248,8 +247,7 @@ func TestBlockWireErrors(t *testing.T) {
 
 		// Decode from wire format.
 		var msg MsgBlock
-		r := newFixedReader(test.max, test.buf)
-		err = msg.BtcDecode(r, test.pver, test.enc)
+		err = msg.BtcDecode(test.buf[:test.max], test.pver, test.enc)
 		if err != test.readErr {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
@@ -426,8 +424,7 @@ func TestBlockOverflowErrors(t *testing.T) {
 	for i, test := range tests {
 		// Decode from wire format.
 		var msg MsgBlock
-		r := bytes.NewReader(test.buf)
-		err := msg.BtcDecode(r, test.pver, test.enc)
+		err := msg.BtcDecode(test.buf, test.pver, test.enc)
 		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, reflect.TypeOf(test.err))
@@ -435,7 +432,7 @@ func TestBlockOverflowErrors(t *testing.T) {
 		}
 
 		// Deserialize from wire format.
-		r = bytes.NewReader(test.buf)
+		r := bytes.NewReader(test.buf)
 		err = msg.Deserialize(r)
 		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
 			t.Errorf("Deserialize #%d wrong error got: %v, want: %v",

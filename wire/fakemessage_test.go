@@ -17,7 +17,7 @@ type fakeMessage struct {
 
 // BtcDecode doesn't do anything.  It just satisfies the wire.Message
 // interface.
-func (msg *fakeMessage) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) error {
+func (msg *fakeMessage) BtcDecode(buf []byte, pver uint32, enc MessageEncoding) error {
 	return nil
 }
 
