@@ -386,8 +386,7 @@ func TestTxWire(t *testing.T) {
 
 		// Decode the message from wire format.
 		var msg MsgTx
-		rbuf := bytes.NewReader(test.buf)
-		err = msg.BtcDecode(rbuf, test.pver, test.enc)
+		err = msg.BtcDecode(test.buf, test.pver, test.enc)
 		if err != nil {
 			t.Errorf("BtcDecode #%d error %v", i, err)
 			continue
@@ -456,8 +455,7 @@ func TestTxWireErrors(t *testing.T) {
 
 		// Decode from wire format.
 		var msg MsgTx
-		r := newFixedReader(test.max, test.buf)
-		err = msg.BtcDecode(r, test.pver, test.enc)
+		err = msg.BtcDecode(test.buf[:test.max], test.pver, test.enc)
 		if err != test.readErr {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
@@ -648,7 +646,7 @@ func TestTxOverflowErrors(t *testing.T) {
 				0x00, 0x00, 0x00, 0x01, // Version
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 				0xff, // Varint for number of input transactions
-			}, pver, BaseEncoding, txVer, &MessageError{},
+			}, pver, BaseEncoding, txVer, io.EOF,
 		},
 
 		// Transaction that claims to have ~uint64(0) outputs.
@@ -658,7 +656,7 @@ func TestTxOverflowErrors(t *testing.T) {
 				0x00, // Varint for number of input transactions
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 				0xff, // Varint for number of output transactions
-			}, pver, BaseEncoding, txVer, &MessageError{},
+			}, pver, BaseEncoding, txVer, io.EOF,
 		},
 
 		// Transaction that has an input with a signature script that
@@ -674,7 +672,7 @@ func TestTxOverflowErrors(t *testing.T) {
 				0xff, 0xff, 0xff, 0xff, // Prevous output index
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 				0xff, // Varint for length of signature script
-			}, pver, BaseEncoding, txVer, &MessageError{},
+			}, pver, BaseEncoding, txVer, io.EOF,
 		},
 
 		// Transaction that has an output with a public key script
@@ -694,7 +692,7 @@ func TestTxOverflowErrors(t *testing.T) {
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Transaction amount
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 				0xff, // Varint for length of public key script
-			}, pver, BaseEncoding, txVer, &MessageError{},
+			}, pver, BaseEncoding, txVer, io.EOF,
 		},
 	}
 
@@ -702,8 +700,7 @@ func TestTxOverflowErrors(t *testing.T) {
 	for i, test := range tests {
 		// Decode from wire format.
 		var msg MsgTx
-		r := bytes.NewReader(test.buf)
-		err := msg.BtcDecode(r, test.pver, test.enc)
+		err := msg.BtcDecode(test.buf, test.pver, test.enc)
 		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, reflect.TypeOf(test.err))
@@ -711,7 +708,7 @@ func TestTxOverflowErrors(t *testing.T) {
 		}
 
 		// Decode from wire format.
-		r = bytes.NewReader(test.buf)
+		r := bytes.NewReader(test.buf)
 		err = msg.Deserialize(r)
 		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
 			t.Errorf("Deserialize #%d wrong error got: %v, want: %v",

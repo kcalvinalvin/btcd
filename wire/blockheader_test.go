@@ -172,8 +172,7 @@ func TestBlockHeaderWire(t *testing.T) {
 			continue
 		}
 
-		rbuf = bytes.NewReader(test.buf)
-		err = bh.BtcDecode(rbuf, pver, test.enc)
+		err = bh.BtcDecode(test.buf, pver, test.enc)
 		if err != nil {
 			t.Errorf("BtcDecode #%d error %v", i, err)
 			continue

@@ -80,7 +80,7 @@ func TestPingBIP0031(t *testing.T) {
 
 	// Test decode with old protocol version.
 	readmsg := NewMsgPing(0)
-	err = readmsg.BtcDecode(&buf, pver, enc)
+	err = readmsg.BtcDecode(buf.Bytes(), pver, enc)
 	if err != nil {
 		t.Errorf("decode of MsgPing failed [%v] err <%v>", buf, err)
 	}
@@ -114,7 +114,7 @@ func TestPingCrossProtocol(t *testing.T) {
 
 	// Decode with old protocol version.
 	readmsg := NewMsgPing(0)
-	err = readmsg.BtcDecode(&buf, BIP0031Version, BaseEncoding)
+	err = readmsg.BtcDecode(buf.Bytes(), BIP0031Version, BaseEncoding)
 	if err != nil {
 		t.Errorf("decode of MsgPing failed [%v] err <%v>", buf, err)
 	}
@@ -181,8 +181,7 @@ func TestPingWire(t *testing.T) {
 
 		// Decode the message from wire format.
 		var msg MsgPing
-		rbuf := bytes.NewReader(test.buf)
-		err = msg.BtcDecode(rbuf, test.pver, test.enc)
+		err = msg.BtcDecode(test.buf, test.pver, test.enc)
 		if err != nil {
 			t.Errorf("BtcDecode #%d error %v", i, err)
 			continue
@@ -234,8 +233,7 @@ func TestPingWireErrors(t *testing.T) {
 
 		// Decode from wire format.
 		var msg MsgPing
-		r := newFixedReader(test.max, test.buf)
-		err = msg.BtcDecode(r, test.pver, test.enc)
+		err = msg.BtcDecode(test.buf, test.pver, test.enc)
 		if err != test.readErr {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)

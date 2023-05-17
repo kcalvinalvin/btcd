@@ -61,15 +61,24 @@ func (msg *MsgBlock) ClearTransactions() {
 // This is part of the Message interface implementation.
 // See Deserialize for decoding blocks stored to disk, such as in a database, as
 // opposed to decoding blocks from the wire.
-func (msg *MsgBlock) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) error {
-	err := readBlockHeader(r, pver, &msg.Header)
+func (msg *MsgBlock) BtcDecode(buf []byte, pver uint32, enc MessageEncoding) error {
+	offset := 0
+	read, err := readBlockHeaderBytes(buf[offset:], pver, &msg.Header)
 	if err != nil {
 		return err
 	}
+	offset += read
+	if offset >= len(buf) {
+		return io.EOF
+	}
 
-	txCount, err := ReadVarInt(r, pver)
+	txCount, read, err := ReadVarIntBytes(buf[offset:], pver)
 	if err != nil {
 		return err
+	}
+	offset += read
+	if offset >= len(buf) {
+		return io.EOF
 	}
 
 	// Prevent more transactions than could possibly fit into a block.
@@ -83,11 +92,18 @@ func (msg *MsgBlock) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) er
 
 	msg.Transactions = make([]*MsgTx, 0, txCount)
 	for i := uint64(0); i < txCount; i++ {
+		if offset >= len(buf) {
+			fmt.Println("1")
+			return io.EOF
+		}
 		tx := MsgTx{}
-		err := tx.BtcDecode(r, pver, enc)
+		err := tx.BtcDecode(buf[offset:], pver, enc)
 		if err != nil {
+			fmt.Println("0")
 			return err
 		}
+		offset += tx.SerializeSize()
+
 		msg.Transactions = append(msg.Transactions, &tx)
 	}
 
@@ -112,14 +128,22 @@ func (msg *MsgBlock) Deserialize(r io.Reader) error {
 	// MessageEncoding parameter indicates that the transactions within the
 	// block are expected to be serialized according to the new
 	// serialization structure defined in BIP0141.
-	return msg.BtcDecode(r, 0, WitnessEncoding)
+	buf, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	return msg.BtcDecode(buf, 0, WitnessEncoding)
 }
 
 // DeserializeNoWitness decodes a block from r into the receiver similar to
 // Deserialize, however DeserializeWitness strips all (if any) witness data
 // from the transactions within the block before encoding them.
 func (msg *MsgBlock) DeserializeNoWitness(r io.Reader) error {
-	return msg.BtcDecode(r, 0, BaseEncoding)
+	buf, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	return msg.BtcDecode(buf, 0, BaseEncoding)
 }
 
 // DeserializeTxLoc decodes r in the same manner Deserialize does, but it takes

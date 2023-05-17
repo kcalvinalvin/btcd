@@ -50,7 +50,7 @@ func TestFilterClearCrossProtocol(t *testing.T) {
 
 	// Decode with old protocol version.
 	var readmsg MsgFilterClear
-	err = readmsg.BtcDecode(&buf, BIP0031Version, LatestEncoding)
+	err = readmsg.BtcDecode(buf.Bytes(), BIP0031Version, LatestEncoding)
 	if err == nil {
 		t.Errorf("decode of MsgFilterClear succeeded when it "+
 			"shouldn't have %v", msg)
@@ -115,8 +115,7 @@ func TestFilterClearWire(t *testing.T) {
 
 		// Decode the message from wire format.
 		var msg MsgFilterClear
-		rbuf := bytes.NewReader(test.buf)
-		err = msg.BtcDecode(rbuf, test.pver, test.enc)
+		err = msg.BtcDecode(test.buf, test.pver, test.enc)
 		if err != nil {
 			t.Errorf("BtcDecode #%d error %v", i, err)
 			continue
@@ -177,8 +176,7 @@ func TestFilterClearWireErrors(t *testing.T) {
 
 		// Decode from wire format.
 		var msg MsgFilterClear
-		r := newFixedReader(test.max, test.buf)
-		err = msg.BtcDecode(r, test.pver, test.enc)
+		err = msg.BtcDecode(test.buf, test.pver, test.enc)
 		if reflect.TypeOf(err) != reflect.TypeOf(test.readErr) {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)

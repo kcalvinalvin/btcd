@@ -5,6 +5,7 @@
 package wire
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 )
@@ -36,7 +37,8 @@ func (msg *MsgHeaders) AddBlockHeader(bh *BlockHeader) error {
 
 // BtcDecode decodes r using the bitcoin protocol encoding into the receiver.
 // This is part of the Message interface implementation.
-func (msg *MsgHeaders) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) error {
+func (msg *MsgHeaders) BtcDecode(buf []byte, pver uint32, enc MessageEncoding) error {
+	r := bytes.NewBuffer(buf)
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
 		return err

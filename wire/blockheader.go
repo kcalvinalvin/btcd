@@ -60,7 +60,8 @@ func (h *BlockHeader) BlockHash() chainhash.Hash {
 // This is part of the Message interface implementation.
 // See Deserialize for decoding block headers stored to disk, such as in a
 // database, as opposed to decoding block headers from the wire.
-func (h *BlockHeader) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) error {
+func (h *BlockHeader) BtcDecode(buf []byte, pver uint32, enc MessageEncoding) error {
+	r := bytes.NewBuffer(buf)
 	return readBlockHeader(r, pver, h)
 }
 
@@ -115,6 +116,11 @@ func NewBlockHeader(version int32, prevHash, merkleRootHash *chainhash.Hash,
 // decoding from the wire.
 func readBlockHeader(r io.Reader, pver uint32, bh *BlockHeader) error {
 	return readElements(r, &bh.Version, &bh.PrevBlock, &bh.MerkleRoot,
+		(*uint32Time)(&bh.Timestamp), &bh.Bits, &bh.Nonce)
+}
+
+func readBlockHeaderBytes(buf []byte, pver uint32, bh *BlockHeader) (int, error) {
+	return readElementsBytes(buf, &bh.Version, &bh.PrevBlock, &bh.MerkleRoot,
 		(*uint32Time)(&bh.Timestamp), &bh.Bits, &bh.Nonce)
 }
 

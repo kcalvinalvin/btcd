@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 )
@@ -18,8 +19,9 @@ type MsgAddrV2 struct {
 }
 
 // BtcDecode decodes r using the bitcoin protocol into a MsgAddrV2.
-func (m *MsgAddrV2) BtcDecode(r io.Reader, pver uint32,
+func (m *MsgAddrV2) BtcDecode(buf []byte, pver uint32,
 	enc MessageEncoding) error {
+	r := bytes.NewBuffer(buf)
 
 	count, err := ReadVarInt(r, pver)
 	if err != nil {

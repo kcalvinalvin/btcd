@@ -5,6 +5,7 @@
 package wire
 
 import (
+	"bytes"
 	"io"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -25,7 +26,8 @@ type MsgGetCFilters struct {
 
 // BtcDecode decodes r using the bitcoin protocol encoding into the receiver.
 // This is part of the Message interface implementation.
-func (msg *MsgGetCFilters) BtcDecode(r io.Reader, pver uint32, _ MessageEncoding) error {
+func (msg *MsgGetCFilters) BtcDecode(buf []byte, pver uint32, _ MessageEncoding) error {
+	r := bytes.NewBuffer(buf)
 	err := readElement(r, &msg.FilterType)
 	if err != nil {
 		return err

@@ -184,11 +184,9 @@ func BenchmarkReadOutPoint(b *testing.B) {
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Previous output hash
 		0xff, 0xff, 0xff, 0xff, // Previous output index
 	}
-	r := bytes.NewReader(buf)
 	var op OutPoint
 	for i := 0; i < b.N; i++ {
-		r.Seek(0, 0)
-		readOutPoint(r, 0, 0, &op)
+		readOutPoint(buf, 0, 0, &op)
 	}
 }
 
@@ -222,12 +220,9 @@ func BenchmarkReadTxOut(b *testing.B) {
 		0xee, // 65-byte signature
 		0xac, // OP_CHECKSIG
 	}
-	r := bytes.NewReader(buf)
 	var txOut TxOut
 	for i := 0; i < b.N; i++ {
-		r.Seek(0, 0)
-		ReadTxOut(r, 0, 0, &txOut)
-		scriptPool.Return(txOut.PkScript)
+		ReadTxOut(buf, 0, 0, &txOut)
 	}
 }
 
@@ -253,12 +248,9 @@ func BenchmarkReadTxIn(b *testing.B) {
 		0x04, 0xff, 0xff, 0x00, 0x1d, 0x01, 0x04, // Signature script
 		0xff, 0xff, 0xff, 0xff, // Sequence
 	}
-	r := bytes.NewReader(buf)
 	var txIn TxIn
 	for i := 0; i < b.N; i++ {
-		r.Seek(0, 0)
-		readTxIn(r, 0, 0, &txIn)
-		scriptPool.Return(txIn.SignatureScript)
+		readTxIn(buf, 0, 0, &txIn)
 	}
 }
 
@@ -399,12 +391,10 @@ func BenchmarkDecodeGetHeaders(b *testing.B) {
 	}
 	buf := bb.Bytes()
 
-	r := bytes.NewReader(buf)
 	var msg MsgGetHeaders
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r.Seek(0, 0)
-		msg.BtcDecode(r, pver, LatestEncoding)
+		msg.BtcDecode(buf, pver, LatestEncoding)
 	}
 }
 
@@ -429,12 +419,10 @@ func BenchmarkDecodeHeaders(b *testing.B) {
 	}
 	buf := bb.Bytes()
 
-	r := bytes.NewReader(buf)
 	var msg MsgHeaders
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r.Seek(0, 0)
-		msg.BtcDecode(r, pver, LatestEncoding)
+		msg.BtcDecode(buf, pver, LatestEncoding)
 	}
 }
 
@@ -459,12 +447,10 @@ func BenchmarkDecodeGetBlocks(b *testing.B) {
 	}
 	buf := bb.Bytes()
 
-	r := bytes.NewReader(buf)
 	var msg MsgGetBlocks
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r.Seek(0, 0)
-		msg.BtcDecode(r, pver, LatestEncoding)
+		msg.BtcDecode(buf, pver, LatestEncoding)
 	}
 }
 
@@ -486,12 +472,10 @@ func BenchmarkDecodeAddr(b *testing.B) {
 	}
 	buf := bb.Bytes()
 
-	r := bytes.NewReader(buf)
 	var msg MsgAddr
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r.Seek(0, 0)
-		msg.BtcDecode(r, pver, LatestEncoding)
+		msg.BtcDecode(buf, pver, LatestEncoding)
 	}
 }
 
@@ -516,12 +500,10 @@ func BenchmarkDecodeInv(b *testing.B) {
 	}
 	buf := bb.Bytes()
 
-	r := bytes.NewReader(buf)
 	var msg MsgInv
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r.Seek(0, 0)
-		msg.BtcDecode(r, pver, LatestEncoding)
+		msg.BtcDecode(buf, pver, LatestEncoding)
 	}
 }
 
@@ -546,12 +528,10 @@ func BenchmarkDecodeNotFound(b *testing.B) {
 	}
 	buf := bb.Bytes()
 
-	r := bytes.NewReader(buf)
 	var msg MsgNotFound
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r.Seek(0, 0)
-		msg.BtcDecode(r, pver, LatestEncoding)
+		msg.BtcDecode(buf, pver, LatestEncoding)
 	}
 }
 
@@ -584,12 +564,10 @@ func BenchmarkDecodeMerkleBlock(b *testing.B) {
 	}
 	buf := bb.Bytes()
 
-	r := bytes.NewReader(buf)
 	var msg MsgMerkleBlock
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		r.Seek(0, 0)
-		msg.BtcDecode(r, pver, LatestEncoding)
+		msg.BtcDecode(buf, pver, LatestEncoding)
 	}
 }
 
