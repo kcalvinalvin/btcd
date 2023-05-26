@@ -7,6 +7,7 @@ package blockchain
 import (
 	"container/list"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
@@ -159,6 +160,47 @@ const (
 	FlushIfNeeded
 )
 
+var pkScriptPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 32)
+		return &b // Pointer to slice to avoid boxing alloc.
+	},
+}
+
+func recyclePkScriptBuf(script *[]byte) {
+	if len(*script) != txscript.MaxScriptSize {
+		return
+	}
+
+	*script = (*script)[:txscript.MaxScriptSize]
+	pkScriptPool.Put(script)
+}
+
+func getPkScriptBuf(size int) *[]byte {
+	buf := pkScriptPool.Get().(*[]byte)
+	if cap(*buf) > size {
+		*buf = (*buf)[:size]
+	} else {
+		*buf = make([]byte, size)
+	}
+
+	return buf
+}
+
+var utxoEntryPool = sync.Pool{
+	New: func() interface{} {
+		return new(UtxoEntry)
+	},
+}
+
+func recycleUtxoEntry(entry *UtxoEntry) {
+	utxoEntryPool.Put(entry)
+}
+
+func getUtxoEntry() *UtxoEntry {
+	return utxoEntryPool.Get().(*UtxoEntry)
+}
+
 // utxoCache is a cached utxo view in the chainstate of a BlockChain.
 //
 // It implements the utxoView interface, but should only be used as such with the
@@ -300,7 +342,7 @@ func (s *utxoCache) addTxOut(outpoint wire.OutPoint, txOut *wire.TxOut, isCoinBa
 		return nil
 	}
 
-	entry := new(UtxoEntry)
+	entry := getUtxoEntry()
 	entry.amount = txOut.Value
 	// Deep copy the script when the script in the entry differs from the one in
 	// the txout.  This is required since the txout script is a subslice of the
@@ -308,8 +350,11 @@ func (s *utxoCache) addTxOut(outpoint wire.OutPoint, txOut *wire.TxOut, isCoinBa
 	// the tx.  It is deep copied here since this entry may be added to the utxo
 	// cache, and we don't want the utxo cache holding the entry to prevent all
 	// of the other tx scripts from getting garbage collected.
-	entry.pkScript = make([]byte, len(txOut.PkScript))
-	copy(entry.pkScript, txOut.PkScript)
+	//entry.pkScript = make([]byte, len(txOut.PkScript))
+	buf := getPkScriptBuf(len(txOut.PkScript))
+	*buf = (*buf)[:len(txOut.PkScript)]
+	copy(*buf, txOut.PkScript)
+	entry.pkScript = *buf
 
 	entry.blockHeight = blockHeight
 	entry.packedFlags = tfFresh | tfModified
@@ -384,13 +429,17 @@ func (s *utxoCache) addTxIn(txIn *wire.TxIn, stxos *[]SpentTxOut) error {
 	// If an entry is fresh it indicates that this entry was spent before it could be
 	// flushed to the database. Because of this, we can return now.
 	if entry.isFresh() {
+		recyclePkScriptBuf(&entry.pkScript)
+		recycleUtxoEntry(entry)
+
 		// If the entry is fresh, we will always have it in the cache.
 		s.cachedEntries.delete(txIn.PreviousOutPoint)
 		s.totalEntryMemory -= entry.memoryUsage()
 	} else {
 		// Can leave the entry to be garbage collected as the only purpose
 		// of this entry now is so that the entry on disk can be deleted.
-		entry = nil
+		recyclePkScriptBuf(&entry.pkScript)
+		recycleUtxoEntry(entry)
 		s.totalEntryMemory -= entry.memoryUsage()
 	}
 
@@ -481,6 +530,8 @@ func (s *utxoCache) flush(bestState *BestState) error {
 
 				// No need to update the cache if the entry was not modified.
 				if !entry.isModified() {
+					recyclePkScriptBuf(&entry.pkScript)
+					recycleUtxoEntry(entry)
 					delete(s.cachedEntries.maps[i], outpoint)
 					continue
 				}
@@ -492,6 +543,8 @@ func (s *utxoCache) flush(bestState *BestState) error {
 					if err != nil {
 						return err
 					}
+					recyclePkScriptBuf(&entry.pkScript)
+					recycleUtxoEntry(entry)
 					delete(s.cachedEntries.maps[i], outpoint)
 
 					continue
@@ -501,6 +554,8 @@ func (s *utxoCache) flush(bestState *BestState) error {
 				if err != nil {
 					return err
 				}
+				recyclePkScriptBuf(&entry.pkScript)
+				recycleUtxoEntry(entry)
 				delete(s.cachedEntries.maps[i], outpoint)
 			}
 		}
