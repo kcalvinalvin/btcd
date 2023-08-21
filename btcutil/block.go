@@ -154,12 +154,26 @@ func (b *Block) Transactions() []*Tx {
 		b.transactions = make([]*Tx, len(b.msgBlock.Transactions))
 	}
 
+	// Offset of each tx.  80 accounts for the block header size.
+	offset := 80 + wire.VarIntSerializeSize(uint64(len(b.msgBlock.Transactions)))
+
 	// Generate and cache the wrapped transactions for all that haven't
 	// already been done.
 	for i, tx := range b.transactions {
 		if tx == nil {
 			newTx := NewTx(b.msgBlock.Transactions[i])
 			newTx.SetIndex(i)
+
+			size := b.msgBlock.Transactions[i].SerializeSize()
+
+			// The block may not always have the serializedBlock.
+			if len(b.serializedBlock) > 0 {
+				// This allows for the reuse of the already serialized tx.
+				newTx.SetBytes(b.serializedBlock[offset : offset+size])
+
+				// Increment offset for this block.
+				offset += size
+			}
 			b.transactions[i] = newTx
 		}
 	}

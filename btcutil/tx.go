@@ -27,6 +27,7 @@ type Tx struct {
 	txHashWitness *chainhash.Hash // Cached transaction witness hash
 	txHasWitness  *bool           // If the transaction has witness data
 	txIndex       int             // Position within a block or TxIndexUnknown
+	rawBytes      []byte          // Raw bytes for the tx in the raw block.
 }
 
 // MsgTx returns the underlying wire.MsgTx for the transaction.
@@ -37,7 +38,8 @@ func (t *Tx) MsgTx() *wire.MsgTx {
 
 // Hash returns the hash of the transaction.  This is equivalent to
 // calling TxHash on the underlying wire.MsgTx, however it caches the
-// result so subsequent calls are more efficient.
+// result so subsequent calls are more efficient.  If the Tx has the
+// raw bytes of the tx cached, it will use that and skip serialization.
 func (t *Tx) Hash() *chainhash.Hash {
 	// Return the cached hash if it has already been generated.
 	if t.txHash != nil {
@@ -45,14 +47,46 @@ func (t *Tx) Hash() *chainhash.Hash {
 	}
 
 	// Cache the hash and return it.
-	hash := t.msgTx.TxHash()
+	var hash chainhash.Hash
+
+	// If we have the raw bytes, then don't call msgTx.TxHash as that has the
+	// overhead of serialization.
+	if len(t.rawBytes) > 0 {
+		// If the raw bytes contain the witness, we must strip it out before
+		// calculating the hash.
+		if t.HasWitness() {
+			baseSize := t.msgTx.SerializeSizeStripped()
+			bytes := make([]byte, 0, baseSize)
+
+			// Append the version bytes.
+			offset := 4
+			bytes = append(bytes, t.rawBytes[:offset]...)
+
+			// Append the input and output bytes.  -8 to account for the
+			// version bytes and the locktime bytes.
+			//
+			// Skip the 2 bytes for the witness encoding.
+			offset += 2
+			bytes = append(bytes, t.rawBytes[offset:offset+baseSize-8]...)
+
+			// Append the last 4 bytes which are the locktime bytes.
+			bytes = append(bytes, t.rawBytes[len(t.rawBytes)-4:]...)
+
+			hash = chainhash.DoubleHashH(bytes)
+		} else {
+			hash = chainhash.DoubleHashH(t.rawBytes)
+		}
+	} else {
+		hash = t.msgTx.TxHash()
+	}
 	t.txHash = &hash
 	return &hash
 }
 
 // WitnessHash returns the witness hash (wtxid) of the transaction.  This is
 // equivalent to calling WitnessHash on the underlying wire.MsgTx, however it
-// caches the result so subsequent calls are more efficient.
+// caches the result so subsequent calls are more efficient.  If the Tx has the
+// raw bytes of the tx cached, it will use that and skip serialization.
 func (t *Tx) WitnessHash() *chainhash.Hash {
 	// Return the cached hash if it has already been generated.
 	if t.txHashWitness != nil {
@@ -60,7 +94,13 @@ func (t *Tx) WitnessHash() *chainhash.Hash {
 	}
 
 	// Cache the hash and return it.
-	hash := t.msgTx.WitnessHash()
+	var hash chainhash.Hash
+	if len(t.rawBytes) > 0 {
+		hash = chainhash.DoubleHashH(t.rawBytes)
+	} else {
+		hash = t.msgTx.WitnessHash()
+	}
+
 	t.txHashWitness = &hash
 	return &hash
 }
@@ -88,6 +128,16 @@ func (t *Tx) Index() int {
 // SetIndex sets the index of the transaction in within a block.
 func (t *Tx) SetIndex(index int) {
 	t.txIndex = index
+}
+
+// SetBytes sets the raw bytes of the tx.
+func (t *Tx) SetBytes(bytes []byte) {
+	t.rawBytes = bytes
+}
+
+// RawBytes returns the cached raw bytes of the tx.
+func (t *Tx) RawBytes() []byte {
+	return t.rawBytes
 }
 
 // NewTx returns a new instance of a bitcoin transaction given an underlying
