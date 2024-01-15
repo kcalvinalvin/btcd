@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/lightninglabs/neutrino/query"
 )
 
 // PeerNotifier exposes methods to notify peers of status changes to
@@ -38,4 +39,6 @@ type Config struct {
 	MaxPeers           int
 
 	FeeEstimator *mempool.FeeEstimator
+
+	ConnectedPeers func() (<-chan query.Peer, func(), error)
 }
