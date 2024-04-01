@@ -39,6 +39,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/decred/dcrd/lru"
+	"github.com/lightninglabs/neutrino/query"
 )
 
 const (
@@ -161,6 +162,13 @@ type peerState struct {
 	outboundGroups  map[string]int
 }
 
+// peerSubscription holds a peer subscription which we'll notify about any
+// connected peers.
+type peerSubscription struct {
+	peers  chan<- query.Peer
+	cancel <-chan struct{}
+}
+
 // Count returns the count of all known peers.
 func (ps *peerState) Count() int {
 	return len(ps.inboundPeers) + len(ps.outboundPeers) +
@@ -224,6 +232,7 @@ type server struct {
 	relayInv             chan relayMsg
 	broadcast            chan broadcastMsg
 	peerHeightsUpdate    chan updatePeerHeightsMsg
+	peerSubscribers      []*peerSubscription
 	wg                   sync.WaitGroup
 	quit                 chan struct{}
 	nat                  NAT
@@ -281,6 +290,8 @@ type serverPeer struct {
 	// The following chans are used to sync blockmanager and server.
 	txProcessed    chan struct{}
 	blockProcessed chan struct{}
+
+	subscribers chan wire.Message
 }
 
 // newServerPeer returns a new serverPeer instance. The peer needs to be set by
@@ -1399,6 +1410,10 @@ func (sp *serverPeer) OnAddrV2(_ *peer.Peer, msg *wire.MsgAddrV2) {
 // the bytes received by the server.
 func (sp *serverPeer) OnRead(_ *peer.Peer, bytesRead int, msg wire.Message, err error) {
 	sp.server.AddBytesReceived(uint64(bytesRead))
+
+	if sp.subscribers != nil {
+		sp.subscribers <- msg
+	}
 }
 
 // OnWrite is invoked when a peer sends a message and it is used to update
@@ -1447,6 +1462,40 @@ func (sp *serverPeer) OnNotFound(p *peer.Peer, msg *wire.MsgNotFound) {
 	}
 
 	sp.server.syncManager.QueueNotFound(msg, p)
+}
+
+func (sp *serverPeer) OnDisconnect() <-chan struct{} {
+	return sp.quit
+}
+
+//type msgSubscription struct {
+//	msgChan  chan<- wire.Message
+//	quitChan <-chan struct{}
+//}
+
+func (sp *serverPeer) SubscribeRecvMsg() (<-chan wire.Message, func()) {
+	msgChan := make(chan wire.Message)
+	sp.subscribers = msgChan
+
+	return msgChan, func() {}
+
+	//// We won't have to buffer this channel, since we'll always send on it
+	//// from a new goroutine.
+	//msgChan := make(chan wire.Message)
+	//quitChan := make(chan struct{})
+
+	//sub := msgSubscription{
+	//	msgChan:  msgChan,
+	//	quitChan: quitChan,
+	//}
+
+	//sp.mtxSubscribers.Lock()
+	//defer sp.mtxSubscribers.Unlock()
+	//sp.recvSubscribers2[sub] = struct{}{}
+
+	//return msgChan, func() {
+	//	close(quitChan)
+	//}
 }
 
 // randomUint16Number returns a random uint16 in a specified input range.  Note
@@ -1525,6 +1574,9 @@ func (s *server) TransactionConfirmed(tx *btcutil.Tx) {
 	iv := wire.NewInvVect(wire.InvTypeTx, tx.Hash())
 	s.RemoveRebroadcastInventory(iv)
 }
+
+//func (s *server) NewPeerConnected(peer *peer.Peer) {
+//}
 
 // pushTxMsg sends a tx message for the provided transaction hash to the
 // connected peer.  An error is returned if the transaction hash is not known.
@@ -1814,7 +1866,48 @@ func (s *server) handleAddPeerMsg(state *peerState, sp *serverPeer) bool {
 		s.addrManager.Good(sp.NA())
 	}
 
+	// Loop for alerting subscribers to the new peers that were connected.
+	n := 0
+	for i, sub := range s.peerSubscribers {
+		select {
+		// Quickly check whether this subscription has been canceled.
+		case <-sub.cancel:
+			// Avoid GC leak.
+			s.peerSubscribers[i] = nil
+			continue
+		default:
+		}
+
+		// Keep non-canceled subscribers around.
+		s.peerSubscribers[n] = sub
+		n++
+
+		// Send a notification in a goroutine to avoid blocking the
+		// peerHandler.
+		s.wg.Add(1)
+		go s.notifyConnectedPeer(sub, sp)
+	}
+
+	// Re-align the slice to only active subscribers.
+	s.peerSubscribers = s.peerSubscribers[:n]
+
 	return true
+}
+
+// notifyConnectedPeer sends the given peer to the peerSubsription.
+//
+// NOTE: MUST be run as a goroutine.
+func (s *server) notifyConnectedPeer(
+	sub *peerSubscription, sp *serverPeer) {
+
+	defer s.wg.Done()
+
+	select {
+	case sub.peers <- sp:
+		btcdLog.Infof("sent the peer over the connection")
+	case <-sub.cancel:
+	case <-s.quit:
+	}
 }
 
 // handleDonePeerMsg deals with peers that have signalled they are done.  It is
@@ -1980,6 +2073,48 @@ type connectNodeMsg struct {
 type removeNodeMsg struct {
 	cmp   func(*serverPeer) bool
 	reply chan error
+}
+
+// ConnectedPeers returns all the currently connected peers to the channel
+// and then any additional new peers on connect.
+func (s *server) ConnectedPeers() (<-chan query.Peer, func(), error) {
+	replyChan := make(chan []*serverPeer, 1)
+
+	// Send a query for a subscription for the connected peers.
+	select {
+	case s.query <- getPeersMsg{
+		reply: replyChan,
+	}:
+
+	case <-s.quit:
+		return nil, nil, nil
+	}
+
+	// Wait for the result here.
+	select {
+	case reply := <-replyChan:
+		// Add all the currently connected peers to the channel.
+		peerChan := make(chan query.Peer, len(reply))
+		for _, serverPeer := range reply {
+			peerChan <- serverPeer
+		}
+
+		// Add the channel to the subscription list so that newly
+		// connected peers are sent over.
+		cancelChan := make(chan struct{})
+		s.peerSubscribers = append(s.peerSubscribers, &peerSubscription{
+			peers:  peerChan,
+			cancel: cancelChan,
+		})
+		btcdLog.Infof("Sent the response for the currently connected" +
+			"peers")
+		return peerChan, func() {
+			close(cancelChan)
+		}, nil
+
+	case <-s.quit:
+		return nil, nil, nil
+	}
 }
 
 // handleQuery is the central handler for all queries and commands from other
@@ -2757,17 +2892,17 @@ func newServer(listenAddrs, agentBlacklist, agentWhitelist []string,
 	}
 
 	s := server{
-		chainParams:          chainParams,
-		addrManager:          amgr,
-		newPeers:             make(chan *serverPeer, cfg.MaxPeers),
-		donePeers:            make(chan *serverPeer, cfg.MaxPeers),
-		banPeers:             make(chan *serverPeer, cfg.MaxPeers),
-		query:                make(chan interface{}),
-		relayInv:             make(chan relayMsg, cfg.MaxPeers),
+		chainParams: chainParams,
+		addrManager: amgr,
+		newPeers:    make(chan *serverPeer, cfg.MaxPeers),
+		donePeers:   make(chan *serverPeer, cfg.MaxPeers),
+		banPeers:    make(chan *serverPeer, cfg.MaxPeers),
+		query:       make(chan interface{}), relayInv: make(chan relayMsg, cfg.MaxPeers),
 		broadcast:            make(chan broadcastMsg, cfg.MaxPeers),
 		quit:                 make(chan struct{}),
 		modifyRebroadcastInv: make(chan interface{}),
 		peerHeightsUpdate:    make(chan updatePeerHeightsMsg),
+		peerSubscribers:      make([]*peerSubscription, 0, 1),
 		nat:                  nat,
 		db:                   db,
 		timeSource:           blockchain.NewMedianTime(),
@@ -2906,6 +3041,7 @@ func newServer(listenAddrs, agentBlacklist, agentWhitelist []string,
 		DisableCheckpoints: cfg.DisableCheckpoints,
 		MaxPeers:           cfg.MaxPeers,
 		FeeEstimator:       s.feeEstimator,
+		ConnectedPeers:     s.ConnectedPeers,
 	})
 	if err != nil {
 		return nil, err
