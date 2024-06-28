@@ -435,7 +435,10 @@ func (s *blockStore) writeBlock(rawBlock []byte) (blockLocation, error) {
 		wc.Lock()
 		wc.curFile.Lock()
 		if wc.curFile.file != nil {
-			_ = wc.curFile.file.Close()
+			err := wc.curFile.file.Close()
+			if err != nil {
+				log.Warnf("Failed to close file. %v", err)
+			}
 			wc.curFile.file = nil
 		}
 		wc.curFile.Unlock()

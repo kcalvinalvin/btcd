@@ -1632,9 +1632,12 @@ func (tx *transaction) writePendingAndCommit() error {
 	for _, fileNum := range tx.pendingDelFileNums {
 		err := tx.db.store.deleteFileFunc(fileNum)
 		if err != nil {
-			// Nothing we can do if we fail to delete blocks besides
-			// return an error.
-			return err
+			// Try again.
+			err := tx.db.store.deleteFileFunc(fileNum)
+			if err != nil {
+				// Nothing we can do if we fail to delete a file.
+				log.Warnf("Failed to delete file %d. %v", fileNum, err)
+			}
 		}
 	}
 
@@ -1779,7 +1782,8 @@ func (tx *transaction) PruneBlocks(targetSize uint64) ([]chainhash.Hash, error) 
 		}
 	}
 
-	log.Tracef("Finished pruning. Database now at %d bytes", totalSize)
+	log.Tracef("Finished pruning. Database will be reduced to %d bytes "+
+		"after this transaction is committed", totalSize)
 
 	return deletedBlockHashes, nil
 }
