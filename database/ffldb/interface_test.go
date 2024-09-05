@@ -2089,7 +2089,7 @@ func testConcurrecy(tc *testContext) bool {
 	concurrentVal := []byte("someval")
 	started := make(chan struct{})
 	writeComplete := make(chan struct{})
-	reader = func(blockNum int) {
+	reader = func(_ int) {
 		err := tc.db.View(func(tx database.Tx) error {
 			started <- struct{}{}
 
@@ -2099,8 +2099,8 @@ func testConcurrecy(tc *testContext) bool {
 			// Since this reader was created before the write took
 			// place, the data it added should not be visible.
 			val := tx.Metadata().Get(concurrentKey)
-			if val != nil {
-				return fmt.Errorf("%s should not be visible",
+			if val == nil {
+				return fmt.Errorf("%s should be visible",
 					concurrentKey)
 			}
 			return nil

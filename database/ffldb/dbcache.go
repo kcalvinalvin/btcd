@@ -286,8 +286,8 @@ func (iter *dbCacheIterator) Error() error {
 // database at a particular point in time.
 type dbCacheSnapshot struct {
 	dbSnapshot    *leveldb.Snapshot
-	pendingKeys   *treap.Immutable
-	pendingRemove *treap.Immutable
+	pendingKeys   *treap.Mutable
+	pendingRemove *treap.Mutable
 }
 
 // Has returns whether or not the passed key exists.
@@ -387,8 +387,8 @@ type dbCache struct {
 	// the cached data.  The cacheLock is used to protect concurrent access
 	// for cache updates and snapshots.
 	cacheLock    sync.RWMutex
-	cachedKeys   *treap.Immutable
-	cachedRemove *treap.Immutable
+	cachedKeys   *treap.Mutable
+	cachedRemove *treap.Mutable
 }
 
 // Snapshot returns a snapshot of the database cache and underlying database at
@@ -516,8 +516,8 @@ func (c *dbCache) flush() error {
 
 	// Clear the cache since it has been flushed.
 	c.cacheLock.Lock()
-	c.cachedKeys = treap.NewImmutable()
-	c.cachedRemove = treap.NewImmutable()
+	c.cachedKeys = treap.NewMutable()
+	c.cachedRemove = treap.NewMutable()
 	c.cacheLock.Unlock()
 
 	return nil
@@ -597,26 +597,20 @@ func (c *dbCache) commitTx(tx *transaction) error {
 
 	// Apply every key to add in the database transaction to the cache.
 	tx.pendingKeys.ForEach(func(k, v []byte) bool {
-		newCachedRemove = newCachedRemove.Delete(k)
-		newCachedKeys = newCachedKeys.Put(k, v)
+		newCachedRemove.Delete(k)
+		newCachedKeys.Put(k, v)
 		return true
 	})
 	tx.pendingKeys = nil
 
 	// Apply every key to remove in the database transaction to the cache.
 	tx.pendingRemove.ForEach(func(k, v []byte) bool {
-		newCachedKeys = newCachedKeys.Delete(k)
-		newCachedRemove = newCachedRemove.Put(k, nil)
+		newCachedKeys.Delete(k)
+		newCachedRemove.Put(k, nil)
 		return true
 	})
 	tx.pendingRemove = nil
 
-	// Atomically replace the immutable treaps which hold the cached keys to
-	// add and delete.
-	c.cacheLock.Lock()
-	c.cachedKeys = newCachedKeys
-	c.cachedRemove = newCachedRemove
-	c.cacheLock.Unlock()
 	return nil
 }
 
@@ -654,7 +648,7 @@ func newDbCache(ldb *leveldb.DB, store *blockStore, maxSize uint64, flushInterva
 		maxSize:       maxSize,
 		flushInterval: time.Second * time.Duration(flushIntervalSecs),
 		lastFlush:     time.Now(),
-		cachedKeys:    treap.NewImmutable(),
-		cachedRemove:  treap.NewImmutable(),
+		cachedKeys:    treap.NewMutable(),
+		cachedRemove:  treap.NewMutable(),
 	}
 }
