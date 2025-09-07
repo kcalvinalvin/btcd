@@ -248,6 +248,19 @@ func (m *Manager) Init(chain *blockchain.BlockChain, interrupt <-chan struct{}) 
 		return err
 	}
 
+	// Drop the script hash index when the format version on disk is not
+	// the one this code reads and writes.  The index is then recreated
+	// empty below and caught back up like a newly enabled index.
+	for _, indexer := range m.enabledIndexes {
+		if _, ok := indexer.(*ScriptHashIndex); !ok {
+			continue
+		}
+		if err := maybeDropStaleScriptHashIndex(m.db, interrupt); err != nil {
+			return err
+		}
+		break
+	}
+
 	// Create the initial state for the indexes as needed.
 	err := m.db.Update(func(dbTx database.Tx) error {
 		// Create the bucket for the current tips as needed.

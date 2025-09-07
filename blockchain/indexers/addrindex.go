@@ -954,6 +954,16 @@ func (idx *AddrIndex) UnconfirmedTxnsForAddress(addr address.Address) []*btcutil
 		return nil
 	}
 
+	return idx.UnconfirmedTxnsForAddressKey(addrKey)
+}
+
+// UnconfirmedTxnsForAddressKey returns all transactions currently in the
+// unconfirmed (memory-only) address index that involve the address with the
+// given address index key.  It is the by-key form of UnconfirmedTxnsForAddress
+// for callers that already hold the key.
+//
+// This function is safe for concurrent access.
+func (idx *AddrIndex) UnconfirmedTxnsForAddressKey(addrKey [addrKeySize]byte) []*btcutil.Tx {
 	// Protect concurrent access.
 	idx.unconfirmedLock.RLock()
 	defer idx.unconfirmedLock.RUnlock()
