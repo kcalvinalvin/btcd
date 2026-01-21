@@ -18,9 +18,9 @@ import (
 
 // genesisCoinbaseTx is the coinbase transaction for the genesis blocks for
 // the main network, regression test network, and test network (version 3).
-var genesisCoinbaseTx = MsgTx{
-	Version: 1,
-	TxIn: []*TxIn{
+var genesisCoinbaseTx = NewMsgTx(
+	1, // Version
+	[]*TxIn{
 		{
 			PreviousOutPoint: OutPoint{
 				Hash:  chainhash.Hash{},
@@ -41,7 +41,7 @@ var genesisCoinbaseTx = MsgTx{
 			Sequence: 0xffffffff,
 		},
 	},
-	TxOut: []*TxOut{
+	[]*TxOut{
 		{
 			Value: 0x12a05f200,
 			PkScript: []byte{
@@ -57,8 +57,8 @@ var genesisCoinbaseTx = MsgTx{
 			},
 		},
 	},
-	LockTime: 0,
-}
+	0, // LockTime
+)
 
 // BenchmarkWriteVarInt1 performs a benchmark on how long it takes to write
 // a single byte variable length integer.
@@ -445,8 +445,6 @@ func BenchmarkReadTxOut(b *testing.B) {
 func BenchmarkReadTxOutBuf(b *testing.B) {
 	b.ReportAllocs()
 
-	scriptBuffer := scriptPool.Borrow()
-	sbuf := scriptBuffer[:]
 	buffer := binarySerializer.Borrow()
 	buf := []byte{
 		0x00, 0xf2, 0x05, 0x2a, 0x01, 0x00, 0x00, 0x00, // Transaction amount
@@ -467,10 +465,9 @@ func BenchmarkReadTxOutBuf(b *testing.B) {
 	var txOut TxOut
 	for i := 0; i < b.N; i++ {
 		r.Seek(0, 0)
-		readTxOutBuf(r, 0, 0, &txOut, buffer, sbuf)
+		readTxOut(r, 0, 0, &txOut, buffer)
 	}
 	binarySerializer.Return(buffer)
-	scriptPool.Return(scriptBuffer)
 }
 
 // BenchmarkWriteTxOut performs a benchmark on how long it takes to write
@@ -478,7 +475,7 @@ func BenchmarkReadTxOutBuf(b *testing.B) {
 func BenchmarkWriteTxOut(b *testing.B) {
 	b.ReportAllocs()
 
-	txOut := blockOne.Transactions[0].TxOut[0]
+	txOut := &blockOne.Transactions[0].TxOut()[0]
 	for i := 0; i < b.N; i++ {
 		WriteTxOut(io.Discard, 0, 0, txOut)
 	}
@@ -490,7 +487,7 @@ func BenchmarkWriteTxOutBuf(b *testing.B) {
 	b.ReportAllocs()
 
 	buf := binarySerializer.Borrow()
-	txOut := blockOne.Transactions[0].TxOut[0]
+	txOut := &blockOne.Transactions[0].TxOut()[0]
 	for i := 0; i < b.N; i++ {
 		WriteTxOutBuf(io.Discard, 0, 0, txOut, buf)
 	}
@@ -502,8 +499,6 @@ func BenchmarkWriteTxOutBuf(b *testing.B) {
 func BenchmarkReadTxIn(b *testing.B) {
 	b.ReportAllocs()
 
-	scriptBuffer := scriptPool.Borrow()
-	sbuf := scriptBuffer[:]
 	buffer := binarySerializer.Borrow()
 	buf := []byte{
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -519,10 +514,9 @@ func BenchmarkReadTxIn(b *testing.B) {
 	var txIn TxIn
 	for i := 0; i < b.N; i++ {
 		r.Seek(0, 0)
-		readTxInBuf(r, 0, 0, &txIn, buffer, sbuf)
+		readTxIn(r, 0, 0, &txIn, buffer)
 	}
 	binarySerializer.Return(buffer)
-	scriptPool.Return(scriptBuffer)
 }
 
 // BenchmarkWriteTxIn performs a benchmark on how long it takes to write
@@ -531,7 +525,7 @@ func BenchmarkWriteTxIn(b *testing.B) {
 	b.ReportAllocs()
 
 	buf := binarySerializer.Borrow()
-	txIn := blockOne.Transactions[0].TxIn[0]
+	txIn := &blockOne.Transactions[0].TxIn()[0]
 	for i := 0; i < b.N; i++ {
 		writeTxInBuf(io.Discard, 0, 0, txIn, buf)
 	}

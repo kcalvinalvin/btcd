@@ -37,12 +37,23 @@ type TxLoc struct {
 	TxLen   int
 }
 
+// txOffset stores the location of a transaction within the block data.
+type txOffset struct {
+	start int
+	end   int
+}
+
 // MsgBlock implements the Message interface and represents a bitcoin
 // block message.  It is used to deliver block and transaction information in
 // response to a getdata message (MsgGetData) for a given block hash.
 type MsgBlock struct {
 	Header       BlockHeader
 	Transactions []*MsgTx
+
+	// Internal tokenizer fields for efficient operations.
+	// When data is non-nil, we have the raw serialized block.
+	data      []byte
+	txOffsets []txOffset
 }
 
 // Copy creates a deep copy of MsgBlock.
@@ -63,12 +74,31 @@ func (msg *MsgBlock) Copy() *MsgBlock {
 func (msg *MsgBlock) AddTransaction(tx *MsgTx) error {
 	msg.Transactions = append(msg.Transactions, tx)
 	return nil
-
 }
 
 // ClearTransactions removes all transactions from the message.
 func (msg *MsgBlock) ClearTransactions() {
 	msg.Transactions = make([]*MsgTx, 0, defaultTransactionAlloc)
+	msg.data = nil
+	msg.txOffsets = nil
+}
+
+// TxData returns the raw bytes for the transaction at the given index.
+// Only available when the block was deserialized from bytes.
+func (msg *MsgBlock) TxData(i int) ([]byte, error) {
+	if len(msg.txOffsets) == 0 {
+		return nil, fmt.Errorf("TxData not available - block was not deserialized from bytes")
+	}
+	if i < 0 || i >= len(msg.txOffsets) {
+		return nil, fmt.Errorf("tx index %d out of range [0, %d)", i, len(msg.txOffsets))
+	}
+	off := msg.txOffsets[i]
+	return msg.data[off.start:off.end], nil
+}
+
+// Bytes returns the raw serialized block bytes if available.
+func (msg *MsgBlock) Bytes() []byte {
+	return msg.data
 }
 
 // BtcDecode decodes r using the bitcoin protocol encoding into the receiver.
@@ -76,41 +106,18 @@ func (msg *MsgBlock) ClearTransactions() {
 // See Deserialize for decoding blocks stored to disk, such as in a database, as
 // opposed to decoding blocks from the wire.
 func (msg *MsgBlock) BtcDecode(r io.Reader, pver uint32, enc MessageEncoding) error {
-	buf := binarySerializer.Borrow()
-	defer binarySerializer.Return(buf)
-
-	err := readBlockHeaderBuf(r, pver, &msg.Header, buf)
+	// Read all data from the reader for zero-copy tokenizer mode.
+	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
 	}
 
-	txCount, err := ReadVarIntBuf(r, pver, buf)
+	parsed, err := NewMsgBlockFromBytes(data)
 	if err != nil {
 		return err
 	}
 
-	// Prevent more transactions than could possibly fit into a block.
-	// It would be possible to cause memory exhaustion and panics without
-	// a sane upper bound on this count.
-	if txCount > maxTxPerBlock {
-		str := fmt.Sprintf("too many transactions to fit into a block "+
-			"[count %d, max %d]", txCount, maxTxPerBlock)
-		return messageError("MsgBlock.BtcDecode", str)
-	}
-
-	scriptBuf := scriptPool.Borrow()
-	defer scriptPool.Return(scriptBuf)
-
-	msg.Transactions = make([]*MsgTx, 0, txCount)
-	for i := uint64(0); i < txCount; i++ {
-		tx := MsgTx{}
-		err := tx.btcDecode(r, pver, enc, buf, scriptBuf[:])
-		if err != nil {
-			return err
-		}
-		msg.Transactions = append(msg.Transactions, &tx)
-	}
-
+	*msg = *parsed
 	return nil
 }
 
@@ -147,52 +154,31 @@ func (msg *MsgBlock) DeserializeNoWitness(r io.Reader) error {
 // start and length of each transaction within the raw data that is being
 // deserialized.
 func (msg *MsgBlock) DeserializeTxLoc(r *bytes.Buffer) ([]TxLoc, error) {
-	fullLen := r.Len()
-
-	buf := binarySerializer.Borrow()
-	defer binarySerializer.Return(buf)
-
-	// At the current time, there is no difference between the wire encoding
-	// at protocol version 0 and the stable long-term storage format.  As
-	// a result, make use of existing wire protocol functions.
-	err := readBlockHeaderBuf(r, 0, &msg.Header, buf)
+	// Use the tokenizer approach - just parse from bytes.
+	data := r.Bytes()
+	parsed, err := NewMsgBlockFromBytes(data)
 	if err != nil {
 		return nil, err
 	}
 
-	txCount, err := ReadVarIntBuf(r, 0, buf)
-	if err != nil {
-		return nil, err
+	*msg = *parsed
+	return msg.TxLoc(), nil
+}
+
+// TxLoc returns the offsets and lengths of each transaction in the block.
+// Only available when the block was deserialized from bytes.
+func (msg *MsgBlock) TxLoc() []TxLoc {
+	if len(msg.txOffsets) == 0 {
+		return nil
 	}
-
-	// Prevent more transactions than could possibly fit into a block.
-	// It would be possible to cause memory exhaustion and panics without
-	// a sane upper bound on this count.
-	if txCount > maxTxPerBlock {
-		str := fmt.Sprintf("too many transactions to fit into a block "+
-			"[count %d, max %d]", txCount, maxTxPerBlock)
-		return nil, messageError("MsgBlock.DeserializeTxLoc", str)
-	}
-
-	scriptBuf := scriptPool.Borrow()
-	defer scriptPool.Return(scriptBuf)
-
-	// Deserialize each transaction while keeping track of its location
-	// within the byte stream.
-	msg.Transactions = make([]*MsgTx, 0, txCount)
-	txLocs := make([]TxLoc, txCount)
-	for i := uint64(0); i < txCount; i++ {
-		txLocs[i].TxStart = fullLen - r.Len()
-		tx := MsgTx{}
-		err := tx.btcDecode(r, 0, WitnessEncoding, buf, scriptBuf[:])
-		if err != nil {
-			return nil, err
+	txLocs := make([]TxLoc, len(msg.txOffsets))
+	for i, off := range msg.txOffsets {
+		txLocs[i] = TxLoc{
+			TxStart: off.start,
+			TxLen:   off.end - off.start,
 		}
-		msg.Transactions = append(msg.Transactions, &tx)
-		txLocs[i].TxLen = (fullLen - r.Len()) - txLocs[i].TxStart
 	}
-
-	return txLocs, nil
+	return txLocs
 }
 
 // BtcEncode encodes the receiver to w using the bitcoin protocol encoding.
@@ -200,6 +186,13 @@ func (msg *MsgBlock) DeserializeTxLoc(r *bytes.Buffer) ([]TxLoc, error) {
 // See Serialize for encoding blocks to be stored to disk, such as in a
 // database, as opposed to encoding blocks for the wire.
 func (msg *MsgBlock) BtcEncode(w io.Writer, pver uint32, enc MessageEncoding) error {
+	// If we have raw bytes and witness encoding is requested, write directly.
+	if len(msg.data) > 0 && enc == WitnessEncoding {
+		_, err := w.Write(msg.data)
+		return err
+	}
+
+	// Serialize from fields.
 	buf := binarySerializer.Borrow()
 	defer binarySerializer.Return(buf)
 
@@ -214,7 +207,7 @@ func (msg *MsgBlock) BtcEncode(w io.Writer, pver uint32, enc MessageEncoding) er
 	}
 
 	for _, tx := range msg.Transactions {
-		err = tx.btcEncode(w, pver, enc, buf)
+		err = tx.BtcEncode(w, pver, enc)
 		if err != nil {
 			return err
 		}
@@ -255,6 +248,10 @@ func (msg *MsgBlock) SerializeNoWitness(w io.Writer) error {
 // SerializeSize returns the number of bytes it would take to serialize the
 // block, factoring in any witness data within transaction.
 func (msg *MsgBlock) SerializeSize() int {
+	if len(msg.data) > 0 {
+		return len(msg.data)
+	}
+
 	// Block header bytes + Serialized varint size for the number of
 	// transactions.
 	n := blockHeaderLen + VarIntSerializeSize(uint64(len(msg.Transactions)))
@@ -316,4 +313,185 @@ func NewMsgBlock(blockHeader *BlockHeader) *MsgBlock {
 		Header:       *blockHeader,
 		Transactions: make([]*MsgTx, 0, defaultTransactionAlloc),
 	}
+}
+
+// NewMsgBlockFromBytes creates a MsgBlock from serialized block bytes.
+// The raw bytes are stored for efficient operations like TxLoc.
+func NewMsgBlockFromBytes(data []byte) (*MsgBlock, error) {
+	// Minimum block size is header + varint(0 txns).
+	if len(data) < blockHeaderLen+1 {
+		return nil, io.EOF
+	}
+
+	msg := &MsgBlock{data: data}
+
+	// Parse block header (80 bytes).
+	// Use a separate scratch buffer, not data[:8], because readBlockHeaderBuf
+	// modifies the scratch buffer and we need to preserve the raw data bytes.
+	var buf [8]byte
+	err := readBlockHeaderBuf(
+		newZeroCopyReader(data[:blockHeaderLen]),
+		0, &msg.Header, buf[:],
+	)
+	if err != nil {
+		return nil, err
+	}
+	offset := blockHeaderLen
+
+	// Read transaction count.
+	txCount, bytesRead := deserializeVarInt(data[offset:])
+	if bytesRead == 0 {
+		return nil, io.EOF
+	}
+	if bytesRead < 0 {
+		return nil, messageError("NewMsgBlockFromBytes",
+			"non-canonical varint encoding for tx count")
+	}
+	offset += bytesRead
+
+	// Sanity check.
+	if txCount > maxTxPerBlock {
+		str := fmt.Sprintf("too many transactions to fit into a block "+
+			"[count %d, max %d]", txCount, maxTxPerBlock)
+		return nil, messageError("NewMsgBlockFromBytes", str)
+	}
+
+	// Parse transactions and record their offsets.
+	msg.txOffsets = make([]txOffset, txCount)
+	msg.Transactions = make([]*MsgTx, txCount)
+	for i := range txCount {
+		txStart := offset
+		txLen, err := scanTransaction(data, offset)
+		if err != nil {
+			return nil, fmt.Errorf("tx %d: %w", i, err)
+		}
+		msg.txOffsets[i] = txOffset{start: txStart, end: txStart + txLen}
+
+		// Parse the transaction.
+		tx, err := NewMsgTxFromBytes(data[txStart : txStart+txLen])
+		if err != nil {
+			return nil, fmt.Errorf("tx %d: %w", i, err)
+		}
+		msg.Transactions[i] = tx
+		offset += txLen
+	}
+
+	return msg, nil
+}
+
+// zeroCopyReader is a minimal io.Reader implementation for a fixed byte slice.
+type zeroCopyReader struct {
+	data []byte
+	pos  int
+}
+
+func newZeroCopyReader(data []byte) *zeroCopyReader {
+	return &zeroCopyReader{data: data}
+}
+
+func (r *zeroCopyReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+// scanTransaction returns the length of the transaction at the given offset.
+func scanTransaction(data []byte, offset int) (int, error) {
+	start := offset
+
+	if len(data) < offset+4 {
+		return 0, io.EOF
+	}
+
+	// Version (4 bytes).
+	offset += 4
+
+	// Input count.
+	inputCount, n := deserializeVarInt(data[offset:])
+	if n == 0 {
+		return 0, io.EOF
+	}
+	if n < 0 {
+		return 0, messageError("scanTransaction", "non-canonical varint")
+	}
+	offset += n
+
+	// Check for witness flag.
+	// The marker byte (0x00) is the same as a varint-encoded 0, so we need to
+	// check if the next byte is the witness flag (0x01) to determine if this
+	// is a witness transaction or just a transaction with 0 inputs.
+	hasWitness := false
+	if inputCount == TxFlagMarker {
+		if len(data) <= offset {
+			return 0, io.EOF
+		}
+		flag := data[offset]
+
+		if flag == WitnessFlag {
+			// This is a witness transaction.
+			offset++ // Skip flag byte
+			hasWitness = true
+
+			// Read actual input count.
+			inputCount, n = deserializeVarInt(data[offset:])
+			if n == 0 {
+				return 0, io.EOF
+			}
+			if n < 0 {
+				return 0, messageError("scanTransaction", "non-canonical varint")
+			}
+			offset += n
+		}
+		// Otherwise, inputCount really is 0 (non-witness transaction with 0 inputs).
+	}
+
+	// Skip inputs.
+	for range inputCount {
+		inputLen, err := scanTxIn(data, offset)
+		if err != nil {
+			return 0, err
+		}
+		offset += inputLen
+	}
+
+	// Output count.
+	outputCount, n := deserializeVarInt(data[offset:])
+	if n == 0 {
+		return 0, io.EOF
+	}
+	if n < 0 {
+		return 0, messageError("scanTransaction", "non-canonical varint")
+	}
+	offset += n
+
+	// Skip outputs.
+	for range outputCount {
+		outputLen, err := scanTxOut(data, offset)
+		if err != nil {
+			return 0, err
+		}
+		offset += outputLen
+	}
+
+	// Skip witness data if present.
+	if hasWitness {
+		for range inputCount {
+			witLen, err := scanWitness(data, offset)
+			if err != nil {
+				return 0, err
+			}
+			offset += witLen
+		}
+	}
+
+	// LockTime (4 bytes).
+	if len(data) < offset+4 {
+		return 0, io.EOF
+	}
+	offset += 4
+
+	return offset - start, nil
 }

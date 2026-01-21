@@ -56,7 +56,14 @@ func TestMessage(t *testing.T) {
 	msgInv := NewMsgInv()
 	msgGetData := NewMsgGetData()
 	msgNotFound := NewMsgNotFound()
-	msgTx := NewMsgTx(1)
+	// Use a minimal non-empty transaction. An empty transaction with 0 inputs
+	// cannot be used because the 0x00 input count byte is the same as the
+	// witness marker, causing parsing ambiguity.
+	msgTx := NewMsgTx(1, []*TxIn{{
+		PreviousOutPoint: OutPoint{Hash: chainhash.Hash{}, Index: 0},
+		SignatureScript:  nil,
+		Sequence:         0xffffffff,
+	}}, []*TxOut{{Value: 0, PkScript: nil}}, 0)
 	msgPing := NewMsgPing(123123)
 	msgPong := NewMsgPong(123123)
 	msgGetHeaders := NewMsgGetHeaders()
@@ -92,7 +99,7 @@ func TestMessage(t *testing.T) {
 		{msgInv, msgInv, pver, MainNet, 25},
 		{msgGetData, msgGetData, pver, MainNet, 25},
 		{msgNotFound, msgNotFound, pver, MainNet, 25},
-		{msgTx, msgTx, pver, MainNet, 34},
+		{msgTx, msgTx, pver, MainNet, 84},
 		{msgPing, msgPing, pver, MainNet, 32},
 		{msgPong, msgPong, pver, MainNet, 32},
 		{msgGetHeaders, msgGetHeaders, pver, MainNet, 61},
@@ -135,7 +142,20 @@ func TestMessage(t *testing.T) {
 				spew.Sdump(msg))
 			continue
 		}
-		if !reflect.DeepEqual(msg, test.out) {
+
+		// Compare by re-encoding both messages and checking the bytes match.
+		// This tests functional equivalence rather than internal struct equality,
+		// since deserialized messages may have different internal representation.
+		var gotBuf, wantBuf bytes.Buffer
+		if err := WriteMessage(&gotBuf, msg, test.pver, test.btcnet); err != nil {
+			t.Errorf("ReadMessage #%d re-encode got error %v", i, err)
+			continue
+		}
+		if err := WriteMessage(&wantBuf, test.out, test.pver, test.btcnet); err != nil {
+			t.Errorf("ReadMessage #%d re-encode want error %v", i, err)
+			continue
+		}
+		if !bytes.Equal(gotBuf.Bytes(), wantBuf.Bytes()) {
 			t.Errorf("ReadMessage #%d\n got: %v want: %v", i,
 				spew.Sdump(msg), spew.Sdump(test.out))
 			continue
@@ -168,7 +188,18 @@ func TestMessage(t *testing.T) {
 				spew.Sdump(msg))
 			continue
 		}
-		if !reflect.DeepEqual(msg, test.out) {
+
+		// Compare by re-encoding both messages and checking the bytes match.
+		var gotBuf, wantBuf bytes.Buffer
+		if err := WriteMessage(&gotBuf, msg, test.pver, test.btcnet); err != nil {
+			t.Errorf("ReadMessage #%d re-encode got error %v", i, err)
+			continue
+		}
+		if err := WriteMessage(&wantBuf, test.out, test.pver, test.btcnet); err != nil {
+			t.Errorf("ReadMessage #%d re-encode want error %v", i, err)
+			continue
+		}
+		if !bytes.Equal(gotBuf.Bytes(), wantBuf.Bytes()) {
 			t.Errorf("ReadMessage #%d\n got: %v want: %v", i,
 				spew.Sdump(msg), spew.Sdump(test.out))
 			continue

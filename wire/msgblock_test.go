@@ -6,6 +6,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"reflect"
 	"testing"
@@ -192,7 +193,16 @@ func TestBlockWire(t *testing.T) {
 			t.Errorf("BtcDecode #%d error %v", i, err)
 			continue
 		}
-		if !reflect.DeepEqual(&msg, test.out) {
+
+		// Compare by re-encoding and checking the bytes match.
+		// This tests functional equivalence rather than internal struct equality,
+		// since deserialized messages have different internal representation.
+		var gotBuf bytes.Buffer
+		if err := msg.BtcEncode(&gotBuf, test.pver, test.enc); err != nil {
+			t.Errorf("BtcDecode #%d re-encode error %v", i, err)
+			continue
+		}
+		if !bytes.Equal(gotBuf.Bytes(), test.buf) {
 			t.Errorf("BtcDecode #%d\n got: %s want: %s", i,
 				spew.Sdump(&msg), spew.Sdump(test.out))
 			continue
@@ -250,7 +260,8 @@ func TestBlockWireErrors(t *testing.T) {
 		var msg MsgBlock
 		r := newFixedReader(test.max, test.buf)
 		err = msg.BtcDecode(r, test.pver, test.enc)
-		if err != test.readErr {
+		// Use errors.Is for comparison since errors may be wrapped with context.
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -297,7 +308,14 @@ func TestBlockSerialize(t *testing.T) {
 			t.Errorf("Deserialize #%d error %v", i, err)
 			continue
 		}
-		if !reflect.DeepEqual(&block, test.out) {
+
+		// Compare by re-encoding and checking the bytes match.
+		var gotBuf bytes.Buffer
+		if err := block.Serialize(&gotBuf); err != nil {
+			t.Errorf("Deserialize #%d re-encode error %v", i, err)
+			continue
+		}
+		if !bytes.Equal(gotBuf.Bytes(), test.buf) {
 			t.Errorf("Deserialize #%d\n got: %s want: %s", i,
 				spew.Sdump(&block), spew.Sdump(test.out))
 			continue
@@ -312,7 +330,14 @@ func TestBlockSerialize(t *testing.T) {
 			t.Errorf("DeserializeTxLoc #%d error %v", i, err)
 			continue
 		}
-		if !reflect.DeepEqual(&txLocBlock, test.out) {
+
+		// Compare by re-encoding and checking the bytes match.
+		var txLocBuf bytes.Buffer
+		if err := txLocBlock.Serialize(&txLocBuf); err != nil {
+			t.Errorf("DeserializeTxLoc #%d re-encode error %v", i, err)
+			continue
+		}
+		if !bytes.Equal(txLocBuf.Bytes(), test.buf) {
 			t.Errorf("DeserializeTxLoc #%d\n got: %s want: %s", i,
 				spew.Sdump(&txLocBlock), spew.Sdump(test.out))
 			continue
@@ -368,7 +393,8 @@ func TestBlockSerializeErrors(t *testing.T) {
 		var block MsgBlock
 		r := newFixedReader(test.max, test.buf)
 		err = block.Deserialize(r)
-		if err != test.readErr {
+		// Use errors.Is for comparison since errors may be wrapped with context.
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("Deserialize #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -377,7 +403,8 @@ func TestBlockSerializeErrors(t *testing.T) {
 		var txLocBlock MsgBlock
 		br := bytes.NewBuffer(test.buf[0:test.max])
 		_, err = txLocBlock.DeserializeTxLoc(br)
-		if err != test.readErr {
+		// Use errors.Is for comparison since errors may be wrapped with context.
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("DeserializeTxLoc #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue
@@ -482,6 +509,111 @@ func TestBlockSerializeSize(t *testing.T) {
 	}
 }
 
+// BenchmarkBlockDeserialize benchmarks the regular Deserialize method.
+func BenchmarkBlockDeserialize(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var block MsgBlock
+		r := bytes.NewReader(blockOneBytes)
+		if err := block.Deserialize(r); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkBlockFromBytes benchmarks parsing a block from bytes.
+func BenchmarkBlockFromBytes(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		bt, err := NewMsgBlockFromBytes(blockOneBytes)
+		if err != nil {
+			b.Fatal(err)
+		}
+		// Access each transaction to simulate realistic usage.
+		for _, tx := range bt.Transactions {
+			_ = tx.TxHash()
+		}
+	}
+}
+
+// TestBlockFromBytes tests parsing a block from bytes.
+func TestBlockFromBytes(t *testing.T) {
+	// Test with block one.
+	bt, err := NewMsgBlockFromBytes(blockOneBytes)
+	if err != nil {
+		t.Fatalf("NewMsgBlockFromBytes failed: %v", err)
+	}
+
+	// Verify the block header.
+	if bt.Header.Version != blockOne.Header.Version {
+		t.Errorf("Version mismatch: got %d, want %d",
+			bt.Header.Version, blockOne.Header.Version)
+	}
+	if bt.Header.PrevBlock != blockOne.Header.PrevBlock {
+		t.Errorf("PrevBlock mismatch")
+	}
+	if bt.Header.MerkleRoot != blockOne.Header.MerkleRoot {
+		t.Errorf("MerkleRoot mismatch")
+	}
+
+	// Verify the transaction count.
+	if len(bt.Transactions) != len(blockOne.Transactions) {
+		t.Fatalf("Transaction count mismatch: got %d, want %d",
+			len(bt.Transactions), len(blockOne.Transactions))
+	}
+
+	// Verify transaction details.
+	for i, tx := range bt.Transactions {
+		wantTx := blockOne.Transactions[i]
+
+		if tx.Version != wantTx.Version {
+			t.Errorf("Tx %d version mismatch: got %d, want %d",
+				i, tx.Version, wantTx.Version)
+		}
+		if tx.InputCount() != wantTx.InputCount() {
+			t.Errorf("Tx %d input count mismatch: got %d, want %d",
+				i, tx.InputCount(), wantTx.InputCount())
+		}
+		if tx.OutputCount() != wantTx.OutputCount() {
+			t.Errorf("Tx %d output count mismatch: got %d, want %d",
+				i, tx.OutputCount(), wantTx.OutputCount())
+		}
+
+		// Verify outputs.
+		wantOuts := wantTx.TxOut()
+		for j, out := range tx.TxOut() {
+			wantOut := wantOuts[j]
+			if out.Value != wantOut.Value {
+				t.Errorf("Tx %d output %d value mismatch: got %d, want %d",
+					i, j, out.Value, wantOut.Value)
+			}
+			if !bytes.Equal(out.PkScript, wantOut.PkScript) {
+				t.Errorf("Tx %d output %d PkScript mismatch", i, j)
+			}
+		}
+
+		// Verify inputs.
+		wantIns := wantTx.TxIn()
+		for j, in := range tx.TxIn() {
+			wantIn := wantIns[j]
+			if in.PreviousOutPoint != wantIn.PreviousOutPoint {
+				t.Errorf("Tx %d input %d outpoint mismatch", i, j)
+			}
+			if in.Sequence != wantIn.Sequence {
+				t.Errorf("Tx %d input %d sequence mismatch: got %d, want %d",
+					i, j, in.Sequence, wantIn.Sequence)
+			}
+		}
+	}
+
+	// Verify block hash matches.
+	gotHash := bt.BlockHash()
+	wantHash := blockOne.BlockHash()
+	if gotHash != wantHash {
+		t.Errorf("BlockHash mismatch: got %v, want %v", gotHash, wantHash)
+	}
+}
+
 // blockOne is the first block in the mainnet block chain.
 var blockOne = MsgBlock{
 	Header: BlockHeader{
@@ -504,9 +636,9 @@ var blockOne = MsgBlock{
 		Nonce:     0x9962e301,               // 2573394689
 	},
 	Transactions: []*MsgTx{
-		{
-			Version: 1,
-			TxIn: []*TxIn{
+		NewMsgTx(
+			1, // Version
+			[]*TxIn{
 				{
 					PreviousOutPoint: OutPoint{
 						Hash:  chainhash.Hash{},
@@ -518,7 +650,7 @@ var blockOne = MsgBlock{
 					Sequence: 0xffffffff,
 				},
 			},
-			TxOut: []*TxOut{
+			[]*TxOut{
 				{
 					Value: 0x12a05f200,
 					PkScript: []byte{
@@ -536,8 +668,8 @@ var blockOne = MsgBlock{
 					},
 				},
 			},
-			LockTime: 0,
-		},
+			0, // LockTime
+		),
 	},
 }
 
