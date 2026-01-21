@@ -292,7 +292,7 @@ func genOPMapping(ctx context.Context, pdb *pebble.DB, chain *blockchain.BlockCh
 		// To get an outpoint's bit index: start_index + output_index.
 		for _, tx := range block.Transactions() {
 			txHash := tx.Hash()
-			numOutputs := len(tx.MsgTx().TxOut)
+			numOutputs := len(tx.MsgTx().TxOut())
 			if numOutputs > 0 {
 				putTxStartIndex(batch, txHash, nextBitIndex)
 				nextBitIndex += uint64(numOutputs)
@@ -406,7 +406,8 @@ func genBitmap(ctx context.Context, pdb *pebble.DB, chain *blockchain.BlockChain
 				if blockchain.IsCoinBaseTx(tx.MsgTx()) {
 					continue
 				}
-				for _, txIn := range tx.MsgTx().TxIn {
+				msgTx := tx.MsgTx()
+				for _, txIn := range msgTx.TxIn() {
 					outpoints = append(outpoints, txIn.PreviousOutPoint)
 				}
 			}

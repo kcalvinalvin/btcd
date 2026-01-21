@@ -13,9 +13,9 @@ import (
 
 // genesisCoinbaseTx is the coinbase transaction for the genesis blocks for
 // the main network, regression test network, and test network (version 3).
-var genesisCoinbaseTx = wire.MsgTx{
-	Version: 1,
-	TxIn: []*wire.TxIn{
+var genesisCoinbaseTx = wire.NewMsgTx(
+	1, // Version
+	[]*wire.TxIn{
 		{
 			PreviousOutPoint: wire.OutPoint{
 				Hash:  chainhash.Hash{},
@@ -36,7 +36,7 @@ var genesisCoinbaseTx = wire.MsgTx{
 			Sequence: 0xffffffff,
 		},
 	},
-	TxOut: []*wire.TxOut{
+	[]*wire.TxOut{
 		{
 			Value: 0x12a05f200,
 			PkScript: []byte{
@@ -52,8 +52,8 @@ var genesisCoinbaseTx = wire.MsgTx{
 			},
 		},
 	},
-	LockTime: 0,
-}
+	0, // LockTime
+)
 
 // genesisHash is the hash of the first block in the block chain for the main
 // network (genesis block).
@@ -84,7 +84,7 @@ var genesisBlock = wire.MsgBlock{
 		Bits:       0x1d00ffff,               // 486604799 [00000000ffff0000000000000000000000000000000000000000000000000000]
 		Nonce:      0x7c2bac1d,               // 2083236893
 	},
-	Transactions: []*wire.MsgTx{&genesisCoinbaseTx},
+	Transactions: []*wire.MsgTx{genesisCoinbaseTx},
 }
 
 // regTestGenesisHash is the hash of the first block in the block chain for the
@@ -112,7 +112,7 @@ var regTestGenesisBlock = wire.MsgBlock{
 		Bits:       0x207fffff,               // 545259519 [7fffff0000000000000000000000000000000000000000000000000000000000]
 		Nonce:      2,
 	},
-	Transactions: []*wire.MsgTx{&genesisCoinbaseTx},
+	Transactions: []*wire.MsgTx{genesisCoinbaseTx},
 }
 
 // testNet3GenesisHash is the hash of the first block in the block chain for the
@@ -140,13 +140,13 @@ var testNet3GenesisBlock = wire.MsgBlock{
 		Bits:       0x1d00ffff,                // 486604799 [00000000ffff0000000000000000000000000000000000000000000000000000]
 		Nonce:      0x18aea41a,                // 414098458
 	},
-	Transactions: []*wire.MsgTx{&genesisCoinbaseTx},
+	Transactions: []*wire.MsgTx{genesisCoinbaseTx},
 }
 
 // testNet4GenesisTx is the transaction for the genesis blocks for test network (version 4).
-var testNet4GenesisTx = wire.MsgTx{
-	Version: 1,
-	TxIn: []*wire.TxIn{
+var testNet4GenesisTx = wire.NewMsgTx(
+	1, // Version
+	[]*wire.TxIn{
 		{
 			PreviousOutPoint: wire.OutPoint{
 				Hash:  chainhash.Hash{},
@@ -168,7 +168,7 @@ var testNet4GenesisTx = wire.MsgTx{
 			Sequence: 0xffffffff,
 		},
 	},
-	TxOut: []*wire.TxOut{
+	[]*wire.TxOut{
 		{
 			Value: 0x12a05f200,
 			PkScript: []byte{
@@ -179,8 +179,8 @@ var testNet4GenesisTx = wire.MsgTx{
 				0x0, 0x0, 0xac},
 		},
 	},
-	LockTime: 0,
-}
+	0, // LockTime
+)
 
 // testNet4GenesisHash is the hash of the first block in the block chain for the
 // test network (version 4).
@@ -211,7 +211,7 @@ var testNet4GenesisBlock = wire.MsgBlock{
 		Bits:       0x1d00ffff,                // 486604799 [00000000ffff0000000000000000000000000000000000000000000000000000]
 		Nonce:      0x17780cbb,                // 393743547
 	},
-	Transactions: []*wire.MsgTx{&testNet4GenesisTx},
+	Transactions: []*wire.MsgTx{testNet4GenesisTx},
 }
 
 // simNetGenesisHash is the hash of the first block in the block chain for the
@@ -239,7 +239,7 @@ var simNetGenesisBlock = wire.MsgBlock{
 		Bits:       0x207fffff,               // 545259519 [7fffff0000000000000000000000000000000000000000000000000000000000]
 		Nonce:      2,
 	},
-	Transactions: []*wire.MsgTx{&genesisCoinbaseTx},
+	Transactions: []*wire.MsgTx{genesisCoinbaseTx},
 }
 
 // sigNetGenesisHash is the hash of the first block in the block chain for the
@@ -267,5 +267,5 @@ var sigNetGenesisBlock = wire.MsgBlock{
 		Bits:       0x1e0377ae,               // 503543726 [00000377ae000000000000000000000000000000000000000000000000000000]
 		Nonce:      52613770,
 	},
-	Transactions: []*wire.MsgTx{&genesisCoinbaseTx},
+	Transactions: []*wire.MsgTx{genesisCoinbaseTx},
 }
