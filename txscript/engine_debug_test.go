@@ -51,16 +51,16 @@ func TestDebugEngine(t *testing.T) {
 	p2trScript, err := PayToTaprootScript(outputKey)
 	require.NoError(t, err)
 
-	testTx := wire.NewMsgTx(2)
-	testTx.AddTxIn(&wire.TxIn{
-		PreviousOutPoint: wire.OutPoint{
-			Index: 1,
-		},
-	})
 	txOut := &wire.TxOut{
 		Value: 1e8, PkScript: p2trScript,
 	}
-	testTx.AddTxOut(txOut)
+	testTx := wire.NewMsgTx(2, []*wire.TxIn{
+		{
+			PreviousOutPoint: wire.OutPoint{
+				Index: 1,
+			},
+		},
+	}, []*wire.TxOut{txOut}, 0)
 
 	prevFetcher := NewCannedPrevOutputFetcher(
 		txOut.PkScript, txOut.Value,
@@ -78,10 +78,17 @@ func TestDebugEngine(t *testing.T) {
 	// including the control block.
 	ctrlBlockBytes, err := ctrlBlock.ToBytes()
 	require.NoError(t, err)
-	txCopy := testTx.Copy()
-	txCopy.TxIn[0].Witness = wire.TxWitness{
-		sig, pkScript, ctrlBlockBytes,
-	}
+	// Create a new transaction with the witness included.
+	txCopy := wire.NewMsgTx(2, []*wire.TxIn{
+		{
+			PreviousOutPoint: wire.OutPoint{
+				Index: 1,
+			},
+			Witness: wire.TxWitness{
+				sig, pkScript, ctrlBlockBytes,
+			},
+		},
+	}, []*wire.TxOut{txOut}, 0)
 
 	expCallback := []StepInfo{
 		// First callback is looking at the OP_1 witness version.

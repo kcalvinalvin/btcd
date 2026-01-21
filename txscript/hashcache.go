@@ -23,7 +23,7 @@ import (
 // from  O(N^2) to O(N).
 func calcHashPrevOuts(tx *wire.MsgTx) chainhash.Hash {
 	var b bytes.Buffer
-	for _, in := range tx.TxIn {
+	for _, in := range tx.TxIn() {
 		// First write out the 32-byte transaction ID one of whose
 		// outputs are being referenced by this input.
 		b.Write(in.PreviousOutPoint.Hash[:])
@@ -46,7 +46,7 @@ func calcHashPrevOuts(tx *wire.MsgTx) chainhash.Hash {
 // from O(N^2) to O(N).
 func calcHashSequence(tx *wire.MsgTx) chainhash.Hash {
 	var b bytes.Buffer
-	for _, in := range tx.TxIn {
+	for _, in := range tx.TxIn() {
 		var buf [4]byte
 		binary.LittleEndian.PutUint32(buf[:], in.Sequence)
 		b.Write(buf[:])
@@ -62,8 +62,8 @@ func calcHashSequence(tx *wire.MsgTx) chainhash.Hash {
 // cached, reducing the total hashing complexity from O(N^2) to O(N).
 func calcHashOutputs(tx *wire.MsgTx) chainhash.Hash {
 	var b bytes.Buffer
-	for _, out := range tx.TxOut {
-		wire.WriteTxOut(&b, 0, 0, out)
+	for _, out := range tx.TxOut() {
+		wire.WriteTxOut(&b, 0, 0, &out)
 	}
 
 	return chainhash.HashH(b.Bytes())
@@ -155,7 +155,7 @@ var _ PrevOutputFetcher = (*MultiPrevOutFetcher)(nil)
 // used for validating taproot inputs.
 func calcHashInputAmounts(tx *wire.MsgTx, inputFetcher PrevOutputFetcher) chainhash.Hash {
 	var b bytes.Buffer
-	for _, txIn := range tx.TxIn {
+	for _, txIn := range tx.TxIn() {
 		prevOut := inputFetcher.FetchPrevOutput(txIn.PreviousOutPoint)
 
 		_ = binary.Write(&b, binary.LittleEndian, prevOut.Value)
@@ -169,7 +169,7 @@ func calcHashInputAmounts(tx *wire.MsgTx, inputFetcher PrevOutputFetcher) chainh
 // for validating taproot inputs.
 func calcHashInputScripts(tx *wire.MsgTx, inputFetcher PrevOutputFetcher) chainhash.Hash {
 	var b bytes.Buffer
-	for _, txIn := range tx.TxIn {
+	for _, txIn := range tx.TxIn() {
 		prevOut := inputFetcher.FetchPrevOutput(txIn.PreviousOutPoint)
 
 		_ = wire.WriteVarBytes(&b, 0, prevOut.PkScript)
@@ -226,7 +226,7 @@ func NewTxSigHashes(tx *wire.MsgTx,
 	// Based on the above distinction, we'll run through all the referenced
 	// inputs to determine what we need to compute.
 	var hasV0Inputs, hasV1Inputs bool
-	for _, txIn := range tx.TxIn {
+	for _, txIn := range tx.TxIn() {
 		// If this is a coinbase input, then we know that we only need
 		// the v0 midstate (though it won't be used) in this instance.
 		outpoint := txIn.PreviousOutPoint

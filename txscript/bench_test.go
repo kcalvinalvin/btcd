@@ -42,7 +42,7 @@ func init() {
 func BenchmarkCalcSigHash(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		for j := 0; j < len(manyInputsBenchTx.TxIn); j++ {
+		for j := 0; j < manyInputsBenchTx.InputCount(); j++ {
 			_, err := CalcSignatureHash(prevOutScript, SigHashAll,
 				&manyInputsBenchTx, j)
 			if err != nil {
@@ -61,7 +61,7 @@ func BenchmarkCalcWitnessSigHash(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		for j := 0; j < len(manyInputsBenchTx.TxIn); j++ {
+		for j := 0; j < manyInputsBenchTx.InputCount(); j++ {
 			_, err := CalcWitnessSigHash(
 				prevOutScript, sigHashes, SigHashAll,
 				&manyInputsBenchTx, j, 5,

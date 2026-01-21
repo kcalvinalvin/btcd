@@ -1026,8 +1026,8 @@ func (vm *Engine) Step() (done bool, err error) {
 
 			vm.scriptIdx++
 
-			witness := vm.tx.TxIn[vm.txIdx].Witness
-			if err := vm.verifyWitnessProgram(witness); err != nil {
+			txIn := vm.tx.TxIn()[vm.txIdx]
+			if err := vm.verifyWitnessProgram(txIn.Witness); err != nil {
 				return false, err
 			}
 
@@ -1469,12 +1469,13 @@ func NewEngine(scriptPubKey []byte, tx *wire.MsgTx, txIdx int, flags ScriptFlags
 	const scriptVersion = 0
 
 	// The provided transaction input index must refer to a valid input.
-	if txIdx < 0 || txIdx >= len(tx.TxIn) {
+	txIns := tx.TxIn()
+	if txIdx < 0 || txIdx >= len(txIns) {
 		str := fmt.Sprintf("transaction input index %d is negative or "+
-			">= %d", txIdx, len(tx.TxIn))
+			">= %d", txIdx, len(txIns))
 		return nil, scriptError(ErrInvalidIndex, str)
 	}
-	scriptSig := tx.TxIn[txIdx].SignatureScript
+	scriptSig := txIns[txIdx].SignatureScript
 
 	// When both the signature script and public key script are empty the result
 	// is necessarily an error since the stack would end up being empty which is
@@ -1585,7 +1586,7 @@ func NewEngine(scriptPubKey []byte, tx *wire.MsgTx, txIdx int, flags ScriptFlags
 			}
 
 			witProgram = scriptPubKey
-		case len(tx.TxIn[txIdx].Witness) != 0 && vm.bip16:
+		case len(txIns[txIdx].Witness) != 0 && vm.bip16:
 			// The sigScript MUST be *exactly* a single canonical
 			// data push of the witness program, otherwise we
 			// reintroduce malleability.
@@ -1615,7 +1616,7 @@ func NewEngine(scriptPubKey []byte, tx *wire.MsgTx, txIdx int, flags ScriptFlags
 			// pkScript or as a datapush within the sigScript, then
 			// there MUST NOT be any witness data associated with
 			// the input being validated.
-			if vm.witnessProgram == nil && len(tx.TxIn[txIdx].Witness) != 0 {
+			if vm.witnessProgram == nil && len(txIns[txIdx].Witness) != 0 {
 				errStr := "non-witness inputs cannot have a witness"
 				return nil, scriptError(ErrWitnessUnexpected, errStr)
 			}

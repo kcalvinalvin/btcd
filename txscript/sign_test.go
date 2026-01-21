@@ -55,9 +55,67 @@ func mkGetScript(scripts map[string][]byte) ScriptDB {
 	})
 }
 
+// rebuildTxWithSignatureScript creates a new transaction with the given signature script
+// for the input at the specified index.
+func rebuildTxWithSignatureScript(tx *wire.MsgTx, idx int, sigScript []byte) *wire.MsgTx {
+	// Collect all inputs, updating the one at idx with the new sigScript.
+	origTxIns := tx.TxIn()
+	txIns := make([]*wire.TxIn, len(origTxIns))
+	for i, txIn := range origTxIns {
+		if i == idx {
+			txIns[i] = &wire.TxIn{
+				PreviousOutPoint: txIn.PreviousOutPoint,
+				SignatureScript:  sigScript,
+				Witness:          txIn.Witness,
+				Sequence:         txIn.Sequence,
+			}
+		} else {
+			txIns[i] = &origTxIns[i]
+		}
+	}
+
+	// Collect all outputs.
+	origTxOuts := tx.TxOut()
+	txOuts := make([]*wire.TxOut, len(origTxOuts))
+	for i := range origTxOuts {
+		txOuts[i] = &origTxOuts[i]
+	}
+
+	return wire.NewMsgTx(tx.Version, txIns, txOuts, tx.LockTime)
+}
+
+// rebuildTxWithWitness creates a new transaction with the given witness
+// for the input at the specified index.
+func rebuildTxWithWitness(tx *wire.MsgTx, idx int, witness wire.TxWitness) *wire.MsgTx {
+	// Collect all inputs, updating the one at idx with the new witness.
+	origTxIns := tx.TxIn()
+	txIns := make([]*wire.TxIn, len(origTxIns))
+	for i, txIn := range origTxIns {
+		if i == idx {
+			txIns[i] = &wire.TxIn{
+				PreviousOutPoint: txIn.PreviousOutPoint,
+				SignatureScript:  txIn.SignatureScript,
+				Witness:          witness,
+				Sequence:         txIn.Sequence,
+			}
+		} else {
+			txIns[i] = &origTxIns[i]
+		}
+	}
+
+	// Collect all outputs.
+	origTxOuts := tx.TxOut()
+	txOuts := make([]*wire.TxOut, len(origTxOuts))
+	for i := range origTxOuts {
+		txOuts[i] = &origTxOuts[i]
+	}
+
+	return wire.NewMsgTx(tx.Version, txIns, txOuts, tx.LockTime)
+}
+
 func checkScripts(msg string, tx *wire.MsgTx, idx int, inputAmt int64, sigScript, pkScript []byte) error {
-	tx.TxIn[idx].SignatureScript = sigScript
-	vm, err := NewEngine(pkScript, tx, idx,
+	txWithSig := rebuildTxWithSignatureScript(tx, idx, sigScript)
+	vm, err := NewEngine(pkScript, txWithSig, idx,
 		ScriptBip16|ScriptVerifyDERSignatures, nil, nil, inputAmt, nil)
 	if err != nil {
 		return fmt.Errorf("failed to make script engine for %s: %v",
@@ -102,48 +160,43 @@ func TestSignTxOutput(t *testing.T) {
 		SigHashSingle | SigHashAnyOneCanPay,
 	}
 	inputAmounts := []int64{5, 10, 15}
-	tx := &wire.MsgTx{
-		Version: 1,
-		TxIn: []*wire.TxIn{
-			{
-				PreviousOutPoint: wire.OutPoint{
-					Hash:  chainhash.Hash{},
-					Index: 0,
-				},
-				Sequence: 4294967295,
+	tx := wire.NewMsgTx(1, []*wire.TxIn{
+		{
+			PreviousOutPoint: wire.OutPoint{
+				Hash:  chainhash.Hash{},
+				Index: 0,
 			},
-			{
-				PreviousOutPoint: wire.OutPoint{
-					Hash:  chainhash.Hash{},
-					Index: 1,
-				},
-				Sequence: 4294967295,
-			},
-			{
-				PreviousOutPoint: wire.OutPoint{
-					Hash:  chainhash.Hash{},
-					Index: 2,
-				},
-				Sequence: 4294967295,
-			},
+			Sequence: 4294967295,
 		},
-		TxOut: []*wire.TxOut{
-			{
-				Value: 1,
+		{
+			PreviousOutPoint: wire.OutPoint{
+				Hash:  chainhash.Hash{},
+				Index: 1,
 			},
-			{
-				Value: 2,
-			},
-			{
-				Value: 3,
-			},
+			Sequence: 4294967295,
 		},
-		LockTime: 0,
-	}
+		{
+			PreviousOutPoint: wire.OutPoint{
+				Hash:  chainhash.Hash{},
+				Index: 2,
+			},
+			Sequence: 4294967295,
+		},
+	}, []*wire.TxOut{
+		{
+			Value: 1,
+		},
+		{
+			Value: 2,
+		},
+		{
+			Value: 3,
+		},
+	}, 0)
 
 	// Pay to Pubkey Hash (uncompressed)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 			key, err := btcec.NewPrivateKey()
 			if err != nil {
@@ -179,7 +232,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to Pubkey Hash (uncompressed) (merging with correct)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 			key, err := btcec.NewPrivateKey()
 			if err != nil {
@@ -238,7 +291,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to Pubkey Hash (compressed)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -276,7 +329,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to Pubkey Hash (compressed) with duplicate merge
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -337,7 +390,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to PubKey (uncompressed)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -375,7 +428,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to PubKey (uncompressed)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -435,7 +488,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to PubKey (compressed)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -473,7 +526,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to PubKey (compressed) with duplicate merge
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -535,7 +588,7 @@ func TestSignTxOutput(t *testing.T) {
 	// As before, but with p2sh now.
 	// Pay to Pubkey Hash (uncompressed)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 			key, err := btcec.NewPrivateKey()
 			if err != nil {
@@ -591,7 +644,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to Pubkey Hash (uncompressed) with duplicate merge
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 			key, err := btcec.NewPrivateKey()
 			if err != nil {
@@ -672,7 +725,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to Pubkey Hash (compressed)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -728,7 +781,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to Pubkey Hash (compressed) with duplicate merge
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -809,7 +862,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to PubKey (uncompressed)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -865,7 +918,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to PubKey (uncompressed) with duplicate merge
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -945,7 +998,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to PubKey (compressed)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -1000,7 +1053,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Pay to PubKey (compressed)
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key, err := btcec.NewPrivateKey()
@@ -1080,7 +1133,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Basic Multisig
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key1, err := btcec.NewPrivateKey()
@@ -1154,7 +1207,7 @@ func TestSignTxOutput(t *testing.T) {
 
 	// Two part multisig, sign with one key then the other.
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key1, err := btcec.NewPrivateKey()
@@ -1258,7 +1311,7 @@ func TestSignTxOutput(t *testing.T) {
 	// Two part multisig, sign with one key then both, check key dedup
 	// correctly.
 	for _, hashType := range hashTypes {
-		for i := range tx.TxIn {
+		for i := range len(tx.TxIn()) {
 			msg := fmt.Sprintf("%d:%d", hashType, i)
 
 			key1, err := btcec.NewPrivateKey()
@@ -1619,19 +1672,21 @@ func TestSignatureScript(t *testing.T) {
 
 nexttest:
 	for i := range sigScriptTests {
-		tx := wire.NewMsgTx(wire.TxVersion)
-
-		output := wire.NewTxOut(500, []byte{OP_RETURN})
-		tx.AddTxOut(output)
-
-		for range sigScriptTests[i].inputs {
-			txin := wire.NewTxIn(coinbaseOutPoint, nil, nil)
-			tx.AddTxIn(txin)
+		// Build initial inputs without signature scripts.
+		txIns := make([]*wire.TxIn, len(sigScriptTests[i].inputs))
+		for j := range sigScriptTests[i].inputs {
+			txIns[j] = wire.NewTxIn(coinbaseOutPoint, nil, nil)
 		}
+
+		// Build output.
+		txOuts := []*wire.TxOut{wire.NewTxOut(500, []byte{OP_RETURN})}
+
+		// Create initial transaction.
+		tx := wire.NewMsgTx(wire.TxVersion, txIns, txOuts, 0)
 
 		var script []byte
 		var err error
-		for j := range tx.TxIn {
+		for j := range len(tx.TxIn()) {
 			var idx int
 			if sigScriptTests[i].inputs[j].indexOutOfRange {
 				t.Errorf("at test %v", sigScriptTests[i].name)
@@ -1659,20 +1714,25 @@ nexttest:
 				continue nexttest
 			}
 
-			tx.TxIn[j].SignatureScript = script
+			// Update the input with the signature script.
+			txIns[j].SignatureScript = script
 		}
+
+		// Rebuild transaction with all signature scripts set.
+		tx = wire.NewMsgTx(wire.TxVersion, txIns, txOuts, 0)
 
 		// If testing using a correct sigscript but for an incorrect
 		// index, use last input script for first input.  Requires > 0
 		// inputs for test.
 		if sigScriptTests[i].scriptAtWrongIndex {
-			tx.TxIn[0].SignatureScript = script
+			txIns[0].SignatureScript = script
 			sigScriptTests[i].inputs[0].inputValidates = false
+			tx = wire.NewMsgTx(wire.TxVersion, txIns, txOuts, 0)
 		}
 
 		// Validate tx input scripts
 		scriptFlags := ScriptBip16 | ScriptVerifyDERSignatures
-		for j := range tx.TxIn {
+		for j := range len(tx.TxIn()) {
 			vm, err := NewEngine(sigScriptTests[i].
 				inputs[j].txout.PkScript, tx, j, scriptFlags, nil, nil, 0, nil)
 			if err != nil {
@@ -1708,18 +1768,19 @@ func TestRawTxInTaprootSignature(t *testing.T) {
 	pkScript, err := PayToTaprootScript(pubKey)
 	require.NoError(t, err)
 
-	// We'll reuse this simple transaction for the tests below. It ends up
-	// spending from a bip86 P2TR output.
-	testTx := wire.NewMsgTx(2)
-	testTx.AddTxIn(&wire.TxIn{
-		PreviousOutPoint: wire.OutPoint{
-			Index: 1,
-		},
-	})
 	txOut := &wire.TxOut{
 		Value: 1e8, PkScript: pkScript,
 	}
-	testTx.AddTxOut(txOut)
+
+	// We'll reuse this simple transaction for the tests below. It ends up
+	// spending from a bip86 P2TR output.
+	testTx := wire.NewMsgTx(2, []*wire.TxIn{
+		{
+			PreviousOutPoint: wire.OutPoint{
+				Index: 1,
+			},
+		},
+	}, []*wire.TxOut{txOut}, 0)
 
 	tests := []struct {
 		sigHashType SigHashType
@@ -1769,8 +1830,8 @@ func TestRawTxInTaprootSignature(t *testing.T) {
 			require.Len(t, sig, expectedLen)
 
 			// Finally, ensure that the signature produced is valid.
-			txCopy := testTx.Copy()
-			txCopy.TxIn[0].Witness = wire.TxWitness{sig}
+			// Rebuild the tx with the witness set on input 0.
+			txCopy := rebuildTxWithWitness(testTx, 0, wire.TxWitness{sig})
 			vm, err := NewEngine(
 				txOut.PkScript, txCopy, 0, StandardVerifyFlags,
 				nil, sigHashes, txOut.Value, prevFetcher,
@@ -1815,18 +1876,19 @@ func TestRawTxInTapscriptSignature(t *testing.T) {
 	p2trScript, err := PayToTaprootScript(outputKey)
 	require.NoError(t, err)
 
-	// We'll reuse this simple transaction for the tests below. It ends up
-	// spending from a bip86 P2TR output.
-	testTx := wire.NewMsgTx(2)
-	testTx.AddTxIn(&wire.TxIn{
-		PreviousOutPoint: wire.OutPoint{
-			Index: 1,
-		},
-	})
 	txOut := &wire.TxOut{
 		Value: 1e8, PkScript: p2trScript,
 	}
-	testTx.AddTxOut(txOut)
+
+	// We'll reuse this simple transaction for the tests below. It ends up
+	// spending from a bip86 P2TR output.
+	testTx := wire.NewMsgTx(2, []*wire.TxIn{
+		{
+			PreviousOutPoint: wire.OutPoint{
+				Index: 1,
+			},
+		},
+	}, []*wire.TxOut{txOut}, 0)
 
 	tests := []struct {
 		sigHashType SigHashType
@@ -1880,10 +1942,11 @@ func TestRawTxInTapscriptSignature(t *testing.T) {
 			// including the control block.
 			ctrlBlockBytes, err := ctrlBlock.ToBytes()
 			require.NoError(t, err)
-			txCopy := testTx.Copy()
-			txCopy.TxIn[0].Witness = wire.TxWitness{
+
+			// Rebuild the tx with the witness set on input 0.
+			txCopy := rebuildTxWithWitness(testTx, 0, wire.TxWitness{
 				sig, pkScript, ctrlBlockBytes,
-			}
+			})
 
 			// Finally, ensure that the signature produced is valid.
 			vm, err := NewEngine(

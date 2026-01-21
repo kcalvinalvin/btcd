@@ -302,22 +302,17 @@ func parseExpectedResult(expected string) ([]ErrorCode, error) {
 func createSpendingTx(witness [][]byte, sigScript, pkScript []byte,
 	outputValue int64) *wire.MsgTx {
 
-	coinbaseTx := wire.NewMsgTx(wire.TxVersion)
-
 	outPoint := wire.NewOutPoint(&chainhash.Hash{}, ^uint32(0))
-	txIn := wire.NewTxIn(outPoint, []byte{OP_0, OP_0}, nil)
-	txOut := wire.NewTxOut(outputValue, pkScript)
-	coinbaseTx.AddTxIn(txIn)
-	coinbaseTx.AddTxOut(txOut)
+	coinbaseTxIn := wire.NewTxIn(outPoint, []byte{OP_0, OP_0}, nil)
+	coinbaseTxOut := wire.NewTxOut(outputValue, pkScript)
+	coinbaseTx := wire.NewMsgTx(wire.TxVersion, []*wire.TxIn{coinbaseTxIn}, []*wire.TxOut{coinbaseTxOut}, 0)
 
-	spendingTx := wire.NewMsgTx(wire.TxVersion)
 	coinbaseTxSha := coinbaseTx.TxHash()
-	outPoint = wire.NewOutPoint(&coinbaseTxSha, 0)
-	txIn = wire.NewTxIn(outPoint, sigScript, witness)
-	txOut = wire.NewTxOut(outputValue, nil)
+	spendOutPoint := wire.NewOutPoint(&coinbaseTxSha, 0)
+	spendTxIn := wire.NewTxIn(spendOutPoint, sigScript, witness)
+	spendTxOut := wire.NewTxOut(outputValue, nil)
 
-	spendingTx.AddTxIn(txIn)
-	spendingTx.AddTxOut(txOut)
+	spendingTx := wire.NewMsgTx(wire.TxVersion, []*wire.TxIn{spendTxIn}, []*wire.TxOut{spendTxOut}, 0)
 
 	return spendingTx
 }
@@ -650,7 +645,7 @@ testloop:
 			})
 		}
 
-		for k, txin := range tx.MsgTx().TxIn {
+		for k, txin := range tx.MsgTx().TxIn() {
 			prevOut := prevOutFetcher.FetchPrevOutput(
 				txin.PreviousOutPoint,
 			)
@@ -807,7 +802,7 @@ testloop:
 			})
 		}
 
-		for k, txin := range tx.MsgTx().TxIn {
+		for k, txin := range tx.MsgTx().TxIn() {
 			prevOut := prevOutFetcher.FetchPrevOutput(
 				txin.PreviousOutPoint,
 			)
@@ -918,12 +913,26 @@ func executeTaprootRefTest(t *testing.T, testCase taprootJsonTest) {
 	if err != nil {
 		t.Fatalf("unable to decode hex: %v", err)
 	}
-	tx, err := btcutil.NewTxFromBytes(txHex)
+	baseTx, err := btcutil.NewTxFromBytes(txHex)
 	if err != nil {
 		t.Fatalf("unable to decode hex: %v", err)
 	}
 
 	var prevOut wire.TxOut
+
+	// Extract inputs from the base transaction.
+	origTxIns := baseTx.MsgTx().TxIn()
+	baseTxIns := make([]*wire.TxIn, len(origTxIns))
+	for i := range origTxIns {
+		baseTxIns[i] = &origTxIns[i]
+	}
+
+	// Extract outputs from the base transaction.
+	origTxOuts := baseTx.MsgTx().TxOut()
+	baseTxOuts := make([]*wire.TxOut, len(origTxOuts))
+	for i := range origTxOuts {
+		baseTxOuts[i] = &origTxOuts[i]
+	}
 
 	prevOutFetcher := NewMultiPrevOutFetcher(nil)
 	for i, prevOutString := range testCase.Prevouts {
@@ -941,7 +950,7 @@ func executeTaprootRefTest(t *testing.T, testCase taprootJsonTest) {
 		}
 
 		prevOutFetcher.AddPrevOut(
-			tx.MsgTx().TxIn[i].PreviousOutPoint, &txOut,
+			baseTxIns[i].PreviousOutPoint, &txOut,
 		)
 
 		if i == testCase.Index {
@@ -954,11 +963,29 @@ func executeTaprootRefTest(t *testing.T, testCase taprootJsonTest) {
 		t.Fatalf("unable to parse flags: %v", err)
 	}
 
-	makeVM := func() *Engine {
-		hashCache := NewTxSigHashes(tx.MsgTx(), prevOutFetcher)
+	// buildTx creates a new transaction with the given sigScript and witness
+	// for the test input index while keeping all other inputs unchanged.
+	buildTx := func(sigScript []byte, witness [][]byte) *wire.MsgTx {
+		// Create copies of inputs with modifications for the test index.
+		txIns := make([]*wire.TxIn, len(baseTxIns))
+		for i, txIn := range baseTxIns {
+			if i == testCase.Index {
+				txIns[i] = wire.NewTxIn(
+					&txIn.PreviousOutPoint, sigScript, witness,
+				)
+				txIns[i].Sequence = txIn.Sequence
+			} else {
+				txIns[i] = txIn
+			}
+		}
+		return wire.NewMsgTx(baseTx.MsgTx().Version, txIns, baseTxOuts, baseTx.MsgTx().LockTime)
+	}
+
+	makeVM := func(tx *wire.MsgTx) *Engine {
+		hashCache := NewTxSigHashes(tx, prevOutFetcher)
 
 		vm, err := NewEngine(
-			prevOut.PkScript, tx.MsgTx(), testCase.Index,
+			prevOut.PkScript, tx, testCase.Index,
 			flags, nil, hashCache, prevOut.Value, prevOutFetcher,
 		)
 		if err != nil {
@@ -969,9 +996,7 @@ func executeTaprootRefTest(t *testing.T, testCase taprootJsonTest) {
 	}
 
 	if testCase.Success != nil {
-		tx.MsgTx().TxIn[testCase.Index].SignatureScript, err = hex.DecodeString(
-			testCase.Success.ScriptSig,
-		)
+		sigScript, err := hex.DecodeString(testCase.Success.ScriptSig)
 		if err != nil {
 			t.Fatalf("unable to parse sig script: %v", err)
 		}
@@ -986,9 +1011,8 @@ func executeTaprootRefTest(t *testing.T, testCase taprootJsonTest) {
 			witness = append(witness, witElem)
 		}
 
-		tx.MsgTx().TxIn[testCase.Index].Witness = witness
-
-		vm := makeVM()
+		tx := buildTx(sigScript, witness)
+		vm := makeVM(tx)
 
 		err = vm.Execute()
 		if err != nil {
@@ -998,9 +1022,7 @@ func executeTaprootRefTest(t *testing.T, testCase taprootJsonTest) {
 	}
 
 	if testCase.Failure != nil {
-		tx.MsgTx().TxIn[testCase.Index].SignatureScript, err = hex.DecodeString(
-			testCase.Failure.ScriptSig,
-		)
+		sigScript, err := hex.DecodeString(testCase.Failure.ScriptSig)
 		if err != nil {
 			t.Fatalf("unable to parse sig script: %v", err)
 		}
@@ -1015,9 +1037,8 @@ func executeTaprootRefTest(t *testing.T, testCase taprootJsonTest) {
 			witness = append(witness, witElem)
 		}
 
-		tx.MsgTx().TxIn[testCase.Index].Witness = witness
-
-		vm := makeVM()
+		tx := buildTx(sigScript, witness)
+		vm := makeVM(tx)
 
 		err = vm.Execute()
 		if err == nil {

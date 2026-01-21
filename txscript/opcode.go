@@ -1110,7 +1110,8 @@ func opcodeCheckLockTimeVerify(op *opcode, data []byte, vm *Engine) error {
 	// NOTE: This implies that even if the transaction is not finalized due to
 	// another input being unlocked, the opcode execution will still fail when the
 	// input being used by the opcode is locked.
-	if vm.tx.TxIn[vm.txIdx].Sequence == wire.MaxTxInSequenceNum {
+	txIn := vm.tx.TxIn()[vm.txIdx]
+	if txIn.Sequence == wire.MaxTxInSequenceNum {
 		return scriptError(ErrUnsatisfiedLockTime,
 			"transaction input is finalized")
 	}
@@ -1181,7 +1182,8 @@ func opcodeCheckSequenceVerify(op *opcode, data []byte, vm *Engine) error {
 	// consensus constrained. Testing that the transaction's sequence
 	// number does not have this bit set prevents using this property
 	// to get around a CHECKSEQUENCEVERIFY check.
-	txSequence := int64(vm.tx.TxIn[vm.txIdx].Sequence)
+	txIn := vm.tx.TxIn()[vm.txIdx]
+	txSequence := int64(txIn.Sequence)
 	if txSequence&int64(wire.SequenceLockTimeDisabled) != 0 {
 		str := fmt.Sprintf("transaction sequence has sequence "+
 			"locktime disabled bit set: 0x%x", txSequence)

@@ -40,29 +40,100 @@ const (
 	blankCodeSepValue = math.MaxUint32
 )
 
+// sigHashTx is a mutable transaction representation used for sighash computation.
+// The pre-segwit sighash algorithm requires modifying inputs and outputs.
+type sigHashTx struct {
+	Version  int32
+	TxIn     []*wire.TxIn
+	TxOut    []*wire.TxOut
+	LockTime uint32
+}
+
+// SerializeNoWitness serializes the transaction without witness data.
+func (s *sigHashTx) SerializeNoWitness(w io.Writer) error {
+	// Version (4 bytes).
+	var scratch [8]byte
+	binary.LittleEndian.PutUint32(scratch[:4], uint32(s.Version))
+	if _, err := w.Write(scratch[:4]); err != nil {
+		return err
+	}
+
+	// Input count.
+	if err := wire.WriteVarInt(w, 0, uint64(len(s.TxIn))); err != nil {
+		return err
+	}
+
+	// Inputs.
+	for _, ti := range s.TxIn {
+		// Previous outpoint hash.
+		if _, err := w.Write(ti.PreviousOutPoint.Hash[:]); err != nil {
+			return err
+		}
+		// Previous outpoint index.
+		binary.LittleEndian.PutUint32(scratch[:4], ti.PreviousOutPoint.Index)
+		if _, err := w.Write(scratch[:4]); err != nil {
+			return err
+		}
+		// Signature script.
+		if err := wire.WriteVarBytes(w, 0, ti.SignatureScript); err != nil {
+			return err
+		}
+		// Sequence.
+		binary.LittleEndian.PutUint32(scratch[:4], ti.Sequence)
+		if _, err := w.Write(scratch[:4]); err != nil {
+			return err
+		}
+	}
+
+	// Output count.
+	if err := wire.WriteVarInt(w, 0, uint64(len(s.TxOut))); err != nil {
+		return err
+	}
+
+	// Outputs.
+	for _, to := range s.TxOut {
+		// Value.
+		binary.LittleEndian.PutUint64(scratch[:8], uint64(to.Value))
+		if _, err := w.Write(scratch[:8]); err != nil {
+			return err
+		}
+		// PkScript.
+		if err := wire.WriteVarBytes(w, 0, to.PkScript); err != nil {
+			return err
+		}
+	}
+
+	// LockTime (4 bytes).
+	binary.LittleEndian.PutUint32(scratch[:4], s.LockTime)
+	_, err := w.Write(scratch[:4])
+	return err
+}
+
 // shallowCopyTx creates a shallow copy of the transaction for use when
-// calculating the signature hash.  It is used over the Copy method on the
+// calculating the signature hash. It is used over the Copy method on the
 // transaction itself since that is a deep copy and therefore does more work and
 // allocates much more space than needed.
-func shallowCopyTx(tx *wire.MsgTx) wire.MsgTx {
+func shallowCopyTx(tx *wire.MsgTx) sigHashTx {
 	// As an additional memory optimization, use contiguous backing arrays
 	// for the copied inputs and outputs and point the final slice of
-	// pointers into the contiguous arrays.  This avoids a lot of small
+	// pointers into the contiguous arrays. This avoids a lot of small
 	// allocations.
-	txCopy := wire.MsgTx{
+	srcIns := tx.TxIn()
+	srcOuts := tx.TxOut()
+	txCopy := sigHashTx{
 		Version:  tx.Version,
-		TxIn:     make([]*wire.TxIn, len(tx.TxIn)),
-		TxOut:    make([]*wire.TxOut, len(tx.TxOut)),
+		TxIn:     make([]*wire.TxIn, len(srcIns)),
+		TxOut:    make([]*wire.TxOut, len(srcOuts)),
 		LockTime: tx.LockTime,
 	}
-	txIns := make([]wire.TxIn, len(tx.TxIn))
-	for i, oldTxIn := range tx.TxIn {
-		txIns[i] = *oldTxIn
+	txIns := make([]wire.TxIn, len(srcIns))
+	copy(txIns, srcIns)
+	for i := range txIns {
 		txCopy.TxIn[i] = &txIns[i]
 	}
-	txOuts := make([]wire.TxOut, len(tx.TxOut))
-	for i, oldTxOut := range tx.TxOut {
-		txOuts[i] = *oldTxOut
+	txOuts := make([]wire.TxOut, len(srcOuts))
+	copy(txOuts, srcOuts)
+	for i := range txOuts {
 		txCopy.TxOut[i] = &txOuts[i]
 	}
 	return txCopy
@@ -107,7 +178,7 @@ func calcSignatureHash(sigScript []byte, hashType SigHashType, tx *wire.MsgTx, i
 	// hash of 1.  This in turn presents an opportunity for attackers to
 	// cleverly construct transactions which can steal those coins provided
 	// they can reuse signatures.
-	if hashType&sigHashMask == SigHashSingle && idx >= len(tx.TxOut) {
+	if hashType&sigHashMask == SigHashSingle && idx >= len(tx.TxOut()) {
 		var hash chainhash.Hash
 		hash[0] = 0x01
 		return hash[:]
@@ -201,8 +272,9 @@ func calcWitnessSignatureHashRaw(subScript []byte, sigHashes *TxSigHashes,
 	// is valid.
 	//
 	// TODO(roasbeef): check needs to be lifted elsewhere?
-	if idx > len(tx.TxIn)-1 {
-		return nil, fmt.Errorf("idx %d but %d txins", idx, len(tx.TxIn))
+	txIns := tx.TxIn()
+	if idx > len(txIns)-1 {
+		return nil, fmt.Errorf("idx %d but %d txins", idx, len(txIns))
 	}
 
 	sigHashBytes := chainhash.DoubleHashRaw(func(w io.Writer) error {
@@ -239,7 +311,7 @@ func calcWitnessSignatureHashRaw(subScript []byte, sigHashes *TxSigHashes,
 			w.Write(zeroHash[:])
 		}
 
-		txIn := tx.TxIn[idx]
+		txIn := txIns[idx]
 
 		// Next, write the outpoint being spent.
 		w.Write(txIn.PreviousOutPoint.Hash[:])
@@ -284,10 +356,11 @@ func calcWitnessSignatureHashRaw(subScript []byte, sigHashes *TxSigHashes,
 
 			w.Write(sigHashes.HashOutputsV0[:])
 		} else if hashType&sigHashMask == SigHashSingle &&
-			idx < len(tx.TxOut) {
+			idx < len(tx.TxOut()) {
 
+			txOut := tx.TxOut()[idx]
 			h := chainhash.DoubleHashRaw(func(tw io.Writer) error {
-				wire.WriteTxOut(tw, 0, 0, tx.TxOut[idx])
+				wire.WriteTxOut(tw, 0, 0, &txOut)
 				return nil
 			})
 			w.Write(h[:])
@@ -463,8 +536,10 @@ func calcTaprootSignatureHashRaw(sigHashes *TxSigHashes, hType SigHashType,
 
 	// As a sanity check, ensure the passed input index for the transaction
 	// is valid.
-	if idx > len(tx.TxIn)-1 {
-		return nil, fmt.Errorf("idx %d but %d txins", idx, len(tx.TxIn))
+	txIns := tx.TxIn()
+	txOuts := tx.TxOut()
+	if idx > len(txIns)-1 {
+		return nil, fmt.Errorf("idx %d but %d txins", idx, len(txIns))
 	}
 
 	// We'll utilize this buffer throughout to incrementally calculate
@@ -515,7 +590,7 @@ func calcTaprootSignatureHashRaw(sigHashes *TxSigHashes, hType SigHashType,
 	// The spend type is computed as the (ext_flag*2) + annex_present. We
 	// use this to bind the extension flag (that BIP 342 uses), as well as
 	// the annex if its present.
-	input := tx.TxIn[idx]
+	input := txIns[idx]
 	witnessHasAnnex := opts.annexHash != nil
 	spendType := byte(opts.extFlag) * 2
 	if witnessHasAnnex {
@@ -567,7 +642,7 @@ func calcTaprootSignatureHashRaw(sigHashes *TxSigHashes, hType SigHashType,
 	if hType&sigHashMask == SigHashSingle {
 		// If this output doesn't exist, then we'll return with an error
 		// here as this is an invalid sighash type for this input.
-		if idx >= len(tx.TxOut) {
+		if idx >= len(txOuts) {
 			// TODO(roasbeef): real error here
 			return nil, fmt.Errorf("invalid sighash type for input")
 		}
@@ -577,8 +652,8 @@ func calcTaprootSignatureHashRaw(sigHashes *TxSigHashes, hType SigHashType,
 		// We'll write the wire serialization of the output and compute
 		// the sha256 in a single step.
 		shaWriter := sha256.New()
-		txOut := tx.TxOut[idx]
-		if err := wire.WriteTxOut(shaWriter, 0, 0, txOut); err != nil {
+		txOut := txOuts[idx]
+		if err := wire.WriteTxOut(shaWriter, 0, 0, &txOut); err != nil {
 			return nil, err
 		}
 

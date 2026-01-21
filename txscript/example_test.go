@@ -102,33 +102,27 @@ func ExampleSignTxOutput() {
 	// For this example, create a fake transaction that represents what
 	// would ordinarily be the real transaction that is being spent.  It
 	// contains a single output that pays to address in the amount of 1 BTC.
-	originTx := wire.NewMsgTx(wire.TxVersion)
-	prevOut := wire.NewOutPoint(&chainhash.Hash{}, ^uint32(0))
-	txIn := wire.NewTxIn(prevOut, []byte{txscript.OP_0, txscript.OP_0}, nil)
-	originTx.AddTxIn(txIn)
 	pkScript, err := txscript.PayToAddrScript(addr)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	txOut := wire.NewTxOut(100000000, pkScript)
-	originTx.AddTxOut(txOut)
+	prevOut := wire.NewOutPoint(&chainhash.Hash{}, ^uint32(0))
+	originTxIn := wire.NewTxIn(prevOut, []byte{txscript.OP_0, txscript.OP_0}, nil)
+	originTxOut := wire.NewTxOut(100000000, pkScript)
+	originTx := wire.NewMsgTx(wire.TxVersion, []*wire.TxIn{originTxIn}, []*wire.TxOut{originTxOut}, 0)
 	originTxHash := originTx.TxHash()
 
 	// Create the transaction to redeem the fake transaction.
-	redeemTx := wire.NewMsgTx(wire.TxVersion)
-
 	// Add the input(s) the redeeming transaction will spend.  There is no
 	// signature script at this point since it hasn't been created or signed
 	// yet, hence nil is provided for it.
-	prevOut = wire.NewOutPoint(&originTxHash, 0)
-	txIn = wire.NewTxIn(prevOut, nil, nil)
-	redeemTx.AddTxIn(txIn)
-
+	redeemPrevOut := wire.NewOutPoint(&originTxHash, 0)
+	redeemTxIn := wire.NewTxIn(redeemPrevOut, nil, nil)
 	// Ordinarily this would contain that actual destination of the funds,
 	// but for this example don't bother.
-	txOut = wire.NewTxOut(0, nil)
-	redeemTx.AddTxOut(txOut)
+	redeemTxOut := wire.NewTxOut(0, nil)
+	redeemTx := wire.NewMsgTx(wire.TxVersion, []*wire.TxIn{redeemTxIn}, []*wire.TxOut{redeemTxOut}, 0)
 
 	// Sign the redeeming transaction.
 	lookupKey := func(a btcutil.Address) (*btcec.PrivateKey, bool, error) {
@@ -152,21 +146,27 @@ func ExampleSignTxOutput() {
 	// Notice that the script database parameter is nil here since it isn't
 	// used.  It must be specified when pay-to-script-hash transactions are
 	// being signed.
+	originTxOut0 := originTx.TxOut()[0]
 	sigScript, err := txscript.SignTxOutput(&chaincfg.MainNetParams,
-		redeemTx, 0, originTx.TxOut[0].PkScript, txscript.SigHashAll,
+		redeemTx, 0, originTxOut0.PkScript, txscript.SigHashAll,
 		txscript.KeyClosure(lookupKey), nil, nil)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	redeemTx.TxIn[0].SignatureScript = sigScript
+
+	// Update the input with the signature script and rebuild the transaction.
+	// With the new MsgTx API, we need to rebuild the transaction since TxIn
+	// returns a copy from the serialized data.
+	redeemTxIn.SignatureScript = sigScript
+	redeemTx = wire.NewMsgTx(wire.TxVersion, []*wire.TxIn{redeemTxIn}, []*wire.TxOut{redeemTxOut}, 0)
 
 	// Prove that the transaction has been validly signed by executing the
 	// script pair.
 	flags := txscript.ScriptBip16 | txscript.ScriptVerifyDERSignatures |
 		txscript.ScriptStrictMultiSig |
 		txscript.ScriptDiscourageUpgradableNops
-	vm, err := txscript.NewEngine(originTx.TxOut[0].PkScript, redeemTx, 0,
+	vm, err := txscript.NewEngine(originTxOut0.PkScript, redeemTx, 0,
 		flags, nil, nil, -1, nil)
 	if err != nil {
 		fmt.Println(err)

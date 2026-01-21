@@ -19,12 +19,11 @@ func init() {
 
 // genTestTx creates a random transaction for uses within test cases.
 func genTestTx() (*wire.MsgTx, *MultiPrevOutFetcher, error) {
-	tx := wire.NewMsgTx(2)
-	tx.Version = rand.Int31()
-
 	prevOuts := NewMultiPrevOutFetcher(nil)
 
+	// Build inputs.
 	numTxins := 1 + rand.Intn(11)
+	txIns := make([]*wire.TxIn, 0, numTxins)
 	for i := 0; i < numTxins; i++ {
 		randTxIn := wire.TxIn{
 			PreviousOutPoint: wire.OutPoint{
@@ -37,14 +36,16 @@ func genTestTx() (*wire.MsgTx, *MultiPrevOutFetcher, error) {
 			return nil, nil, err
 		}
 
-		tx.TxIn = append(tx.TxIn, &randTxIn)
+		txIns = append(txIns, &randTxIn)
 
 		prevOuts.AddPrevOut(
 			randTxIn.PreviousOutPoint, &wire.TxOut{},
 		)
 	}
 
+	// Build outputs.
 	numTxouts := 1 + rand.Intn(11)
+	txOuts := make([]*wire.TxOut, 0, numTxouts)
 	for i := 0; i < numTxouts; i++ {
 		randTxOut := wire.TxOut{
 			Value:    rand.Int63(),
@@ -53,8 +54,11 @@ func genTestTx() (*wire.MsgTx, *MultiPrevOutFetcher, error) {
 		if _, err := rand.Read(randTxOut.PkScript); err != nil {
 			return nil, nil, err
 		}
-		tx.TxOut = append(tx.TxOut, &randTxOut)
+		txOuts = append(txOuts, &randTxOut)
 	}
+
+	// Create the transaction with a random version.
+	tx := wire.NewMsgTx(rand.Int31(), txIns, txOuts, 0)
 
 	return tx, prevOuts, nil
 }
