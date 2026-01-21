@@ -189,9 +189,9 @@ func (m *CPUMiner) submitBlock(block *btcutil.Block) bool {
 	}
 
 	// The block was accepted.
-	coinbaseTx := block.MsgBlock().Transactions[0].TxOut[0]
+	coinbaseTxOut := block.MsgBlock().Transactions[0].TxOut()[0]
 	log.Infof("Block submitted via CPU miner accepted (hash %s, "+
-		"amount %v)", block.Hash(), btcutil.Amount(coinbaseTx.Value))
+		"amount %v)", block.Hash(), btcutil.Amount(coinbaseTxOut.Value))
 	return true
 }
 

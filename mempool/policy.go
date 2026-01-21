@@ -94,7 +94,8 @@ func checkInputsStandard(tx *btcutil.Tx, utxoView *blockchain.UtxoViewpoint) err
 	// but coinbases have already been rejected prior to calling this
 	// function so no need to recheck.
 
-	for i, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for i, txIn := range msgTx.TxIn() {
 		// It is safe to elide existence and index checks here since
 		// they have already been checked prior to calling this
 		// function.
@@ -288,9 +289,10 @@ func CheckTransactionStandard(tx *btcutil.Tx, height int32,
 
 	// The transaction must be a currently supported version.
 	msgTx := tx.MsgTx()
-	if msgTx.Version > maxTxVersion || msgTx.Version < 1 {
+	txVersion := msgTx.Version
+	if txVersion > maxTxVersion || txVersion < 1 {
 		str := fmt.Sprintf("transaction version %d is not in the "+
-			"valid range of %d-%d", msgTx.Version, 1,
+			"valid range of %d-%d", txVersion, 1,
 			maxTxVersion)
 		return txRuleError(wire.RejectNonstandard, str)
 	}
@@ -313,7 +315,7 @@ func CheckTransactionStandard(tx *btcutil.Tx, height int32,
 		return txRuleError(wire.RejectNonstandard, str)
 	}
 
-	for i, txIn := range msgTx.TxIn {
+	for i, txIn := range msgTx.TxIn() {
 		// Each transaction input signature script must not exceed the
 		// maximum size allowed for a standard transaction.  See
 		// the comment on maxStandardSigScriptSize for more details.
@@ -338,7 +340,9 @@ func CheckTransactionStandard(tx *btcutil.Tx, height int32,
 	// None of the output public key scripts can be a non-standard script or
 	// be "dust" (except when the script is a null data script).
 	numNullDataOutputs := 0
-	for i, txOut := range msgTx.TxOut {
+	txOuts := msgTx.TxOut()
+	for i := range txOuts {
+		txOut := &txOuts[i]
 		scriptClass := txscript.GetScriptClass(txOut.PkScript)
 		err := checkPkScriptStandard(txOut.PkScript, scriptClass)
 		if err != nil {

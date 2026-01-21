@@ -270,19 +270,19 @@ func createCoinbaseTx(params *chaincfg.Params, coinbaseScript []byte, nextBlockH
 		}
 	}
 
-	tx := wire.NewMsgTx(wire.TxVersion)
-	tx.AddTxIn(&wire.TxIn{
+	txIn := []*wire.TxIn{{
 		// Coinbase transactions have no inputs, so previous outpoint is
 		// zero hash and max index.
 		PreviousOutPoint: *wire.NewOutPoint(&chainhash.Hash{},
 			wire.MaxPrevOutIndex),
 		SignatureScript: coinbaseScript,
 		Sequence:        wire.MaxTxInSequenceNum,
-	})
-	tx.AddTxOut(&wire.TxOut{
+	}}
+	txOut := []*wire.TxOut{{
 		Value:    blockchain.CalcBlockSubsidy(nextBlockHeight, params),
 		PkScript: pkScript,
-	})
+	}}
+	tx := wire.NewMsgTx(wire.TxVersion, txIn, txOut, 0)
 	return btcutil.NewTx(tx), nil
 }
 
@@ -290,7 +290,8 @@ func createCoinbaseTx(params *chaincfg.Params, coinbaseScript []byte, nextBlockH
 // transaction as spent.  It also adds all outputs in the passed transaction
 // which are not provably unspendable as available unspent transaction outputs.
 func spendTransaction(utxoView *blockchain.UtxoViewpoint, tx *btcutil.Tx, height int32) error {
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		entry := utxoView.LookupEntry(txIn.PreviousOutPoint)
 		if entry != nil {
 			entry.Spend()
@@ -536,7 +537,8 @@ mempoolLoop:
 		// other transactions in the mempool so they can be properly
 		// ordered below.
 		prioItem := &txPrioItem{tx: tx}
-		for _, txIn := range tx.MsgTx().TxIn {
+		msgTx := tx.MsgTx()
+		for _, txIn := range msgTx.TxIn() {
 			originHash := &txIn.PreviousOutPoint.Hash
 			entry := utxos.LookupEntry(txIn.PreviousOutPoint)
 			if entry == nil || entry.IsSpent() {
@@ -635,15 +637,37 @@ mempoolLoop:
 			// Therefore, we account for the additional weight
 			// within the block with a model coinbase tx with a
 			// witness commitment.
-			coinbaseCopy := btcutil.NewTx(coinbaseTx.MsgTx().Copy())
-			coinbaseCopy.MsgTx().TxIn[0].Witness = [][]byte{
-				bytes.Repeat([]byte("a"),
-					blockchain.CoinbaseWitnessDataLen),
+			//
+			// Build a new transaction with witness data on the
+			// coinbase input and an additional commitment output.
+			origTx := coinbaseTx.MsgTx()
+			origTxIn := origTx.TxIn()[0]
+
+			// Create new TxIn with witness data.
+			newTxIn := []*wire.TxIn{{
+				PreviousOutPoint: origTxIn.PreviousOutPoint,
+				SignatureScript:  origTxIn.SignatureScript,
+				Sequence:         origTxIn.Sequence,
+				Witness: [][]byte{
+					bytes.Repeat([]byte("a"),
+						blockchain.CoinbaseWitnessDataLen),
+				},
+			}}
+
+			// Copy existing outputs and add commitment output.
+			origTxOuts := origTx.TxOut()
+			newTxOut := make([]*wire.TxOut, 0, len(origTxOuts)+1)
+			for i := range origTxOuts {
+				newTxOut = append(newTxOut, &origTxOuts[i])
 			}
-			coinbaseCopy.MsgTx().AddTxOut(&wire.TxOut{
+			newTxOut = append(newTxOut, &wire.TxOut{
 				PkScript: bytes.Repeat([]byte("a"),
 					blockchain.CoinbaseWitnessPkScriptLength),
 			})
+
+			coinbaseCopy := btcutil.NewTx(wire.NewMsgTx(
+				origTx.Version, newTxIn, newTxOut, origTx.LockTime,
+			))
 
 			// In order to accurately account for the weight
 			// addition due to this coinbase transaction, we'll add
@@ -792,7 +816,31 @@ mempoolLoop:
 	blockWeight -= wire.MaxVarIntPayload -
 		(uint32(wire.VarIntSerializeSize(uint64(len(blockTxns)))) *
 			blockchain.WitnessScaleFactor)
-	coinbaseTx.MsgTx().TxOut[0].Value += totalFees
+
+	// Rebuild the coinbase transaction with the total fees added.
+	origCoinbase := coinbaseTx.MsgTx()
+	origCoinbaseIns := origCoinbase.TxIn()
+	newTxIns := make([]*wire.TxIn, len(origCoinbaseIns))
+	for i := range origCoinbaseIns {
+		newTxIns[i] = &origCoinbaseIns[i]
+	}
+	origCoinbaseOuts := origCoinbase.TxOut()
+	newTxOuts := make([]*wire.TxOut, len(origCoinbaseOuts))
+	for i := range origCoinbaseOuts {
+		if i == 0 {
+			// Add fees to the first output.
+			newTxOuts[i] = &wire.TxOut{
+				Value:    origCoinbaseOuts[i].Value + totalFees,
+				PkScript: origCoinbaseOuts[i].PkScript,
+			}
+		} else {
+			newTxOuts[i] = &origCoinbaseOuts[i]
+		}
+	}
+	coinbaseTx = btcutil.NewTx(wire.NewMsgTx(
+		origCoinbase.Version, newTxIns, newTxOuts, origCoinbase.LockTime,
+	))
+	blockTxns[0] = coinbaseTx
 	txFees[0] = -totalFees
 
 	// If segwit is active and we included transactions with witness data,
@@ -860,13 +908,13 @@ mempoolLoop:
 
 // AddWitnessCommitment adds the witness commitment as an OP_RETURN output
 // within the coinbase tx.  The raw commitment is returned.
+// NOTE: This function modifies blockTxns[0] with a new coinbase transaction.
 func AddWitnessCommitment(coinbaseTx *btcutil.Tx,
 	blockTxns []*btcutil.Tx) []byte {
 
 	// The witness of the coinbase transaction MUST be exactly 32-bytes
 	// of all zeroes.
 	var witnessNonce [blockchain.CoinbaseWitnessDataLen]byte
-	coinbaseTx.MsgTx().TxIn[0].Witness = wire.TxWitness{witnessNonce[:]}
 
 	// Next, obtain the merkle root of a tree which consists of the
 	// wtxid of all transactions in the block. The coinbase
@@ -887,14 +935,35 @@ func AddWitnessCommitment(coinbaseTx *btcutil.Tx,
 	witnessCommitment := chainhash.DoubleHashB(witnessPreimage[:])
 	witnessScript := append(blockchain.WitnessMagicBytes, witnessCommitment...)
 
-	// Finally, create the OP_RETURN carrying witness commitment
-	// output as an additional output within the coinbase.
-	commitmentOutput := &wire.TxOut{
+	// Rebuild the coinbase transaction with the witness data and
+	// commitment output.
+	origTx := coinbaseTx.MsgTx()
+
+	// Create new TxIn with witness data.
+	origTxIn := origTx.TxIn()[0]
+	newTxIns := []*wire.TxIn{{
+		PreviousOutPoint: origTxIn.PreviousOutPoint,
+		SignatureScript:  origTxIn.SignatureScript,
+		Sequence:         origTxIn.Sequence,
+		Witness:          wire.TxWitness{witnessNonce[:]},
+	}}
+
+	// Copy existing outputs and add commitment output.
+	origTxOuts := origTx.TxOut()
+	newTxOuts := make([]*wire.TxOut, 0, len(origTxOuts)+1)
+	for i := range origTxOuts {
+		newTxOuts = append(newTxOuts, &origTxOuts[i])
+	}
+	newTxOuts = append(newTxOuts, &wire.TxOut{
 		Value:    0,
 		PkScript: witnessScript,
-	}
-	coinbaseTx.MsgTx().TxOut = append(coinbaseTx.MsgTx().TxOut,
-		commitmentOutput)
+	})
+
+	// Create the new coinbase transaction and update the block.
+	newCoinbaseTx := btcutil.NewTx(wire.NewMsgTx(
+		origTx.Version, newTxIns, newTxOuts, origTx.LockTime,
+	))
+	blockTxns[0] = newCoinbaseTx
 
 	return witnessCommitment
 }
@@ -939,11 +1008,24 @@ func (g *BlkTmplGenerator) UpdateExtraNonce(msgBlock *wire.MsgBlock, blockHeight
 			len(coinbaseScript), blockchain.MinCoinbaseScriptLen,
 			blockchain.MaxCoinbaseScriptLen)
 	}
-	msgBlock.Transactions[0].TxIn[0].SignatureScript = coinbaseScript
 
-	// TODO(davec): A btcutil.Block should use saved in the state to avoid
-	// recalculating all of the other transaction hashes.
-	// block.Transactions[0].InvalidateCache()
+	// Rebuild the coinbase transaction with the new signature script.
+	origTx := msgBlock.Transactions[0]
+	origTxIn := origTx.TxIn()[0]
+	newTxIns := []*wire.TxIn{{
+		PreviousOutPoint: origTxIn.PreviousOutPoint,
+		SignatureScript:  coinbaseScript,
+		Sequence:         origTxIn.Sequence,
+		Witness:          origTxIn.Witness,
+	}}
+	origTxOuts := origTx.TxOut()
+	newTxOuts := make([]*wire.TxOut, len(origTxOuts))
+	for i := range origTxOuts {
+		newTxOuts[i] = &origTxOuts[i]
+	}
+	msgBlock.Transactions[0] = wire.NewMsgTx(
+		origTx.Version, newTxIns, newTxOuts, origTx.LockTime,
+	)
 
 	// Recalculate the merkle root with the updated extra nonce.
 	block := btcutil.NewBlock(msgBlock)

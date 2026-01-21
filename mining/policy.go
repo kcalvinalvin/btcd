@@ -64,7 +64,7 @@ func minInt(a, b int) int {
 // contribute no additional input age to the transaction.
 func calcInputValueAge(tx *wire.MsgTx, utxoView *blockchain.UtxoViewpoint, nextBlockHeight int32) float64 {
 	var totalInputAge float64
-	for _, txIn := range tx.TxIn {
+	for _, txIn := range tx.TxIn() {
 		// Don't attempt to accumulate the total input age if the
 		// referenced transaction output doesn't exist.
 		entry := utxoView.LookupEntry(txIn.PreviousOutPoint)
@@ -116,7 +116,7 @@ func CalcPriority(tx *wire.MsgTx, utxoView *blockchain.UtxoViewpoint, nextBlockH
 	//
 	// Thus 1 + 73 + 1 + 1 + 33 + 1 = 110
 	overhead := 0
-	for _, txIn := range tx.TxIn {
+	for _, txIn := range tx.TxIn() {
 		// Max inputs + size can't possibly overflow here.
 		overhead += 41 + minInt(110, len(txIn.SignatureScript))
 	}

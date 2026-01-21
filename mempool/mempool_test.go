@@ -47,14 +47,14 @@ func (s *fakeChain) FetchUtxoView(tx *btcutil.Tx) (*blockchain.UtxoViewpoint, er
 	// Add an entry for the tx itself to the new view.
 	viewpoint := blockchain.NewUtxoViewpoint()
 	prevOut := wire.OutPoint{Hash: *tx.Hash()}
-	for txOutIdx := range tx.MsgTx().TxOut {
+	for txOutIdx := range tx.MsgTx().TxOut() {
 		prevOut.Index = uint32(txOutIdx)
 		entry := s.utxos.LookupEntry(prevOut)
 		viewpoint.Entries()[prevOut] = entry.Clone()
 	}
 
 	// Add entries for all of the inputs to the tx to the new view.
-	for _, txIn := range tx.MsgTx().TxIn {
+	for _, txIn := range tx.MsgTx().TxIn() {
 		entry := s.utxos.LookupEntry(txIn.PreviousOutPoint)
 		viewpoint.Entries()[txIn.PreviousOutPoint] = entry.Clone()
 	}
@@ -117,9 +117,10 @@ type spendableOutput struct {
 // of the output to use.  This is useful as a convenience when creating test
 // transactions.
 func txOutToSpendableOut(tx *btcutil.Tx, outputNum uint32) spendableOutput {
+	txOut := tx.MsgTx().TxOut()[outputNum]
 	return spendableOutput{
 		outPoint: wire.OutPoint{Hash: *tx.Hash(), Index: outputNum},
-		amount:   btcutil.Amount(tx.MsgTx().TxOut[outputNum].Value),
+		amount:   btcutil.Amount(txOut.Value),
 	}
 }
 
@@ -155,18 +156,23 @@ func (p *poolHarness) CreateCoinbaseTx(blockHeight int32, numOutputs uint32) (*b
 		return nil, err
 	}
 
-	tx := wire.NewMsgTx(wire.TxVersion)
-	tx.AddTxIn(&wire.TxIn{
-		// Coinbase transactions have no inputs, so previous outpoint is
-		// zero hash and max index.
-		PreviousOutPoint: *wire.NewOutPoint(&chainhash.Hash{},
-			wire.MaxPrevOutIndex),
-		SignatureScript: coinbaseScript,
-		Sequence:        wire.MaxTxInSequenceNum,
-	})
+	// Collect inputs.
+	txIns := []*wire.TxIn{
+		{
+			// Coinbase transactions have no inputs, so previous outpoint is
+			// zero hash and max index.
+			PreviousOutPoint: *wire.NewOutPoint(&chainhash.Hash{},
+				wire.MaxPrevOutIndex),
+			SignatureScript: coinbaseScript,
+			Sequence:        wire.MaxTxInSequenceNum,
+		},
+	}
+
+	// Collect outputs.
 	totalInput := blockchain.CalcBlockSubsidy(blockHeight, p.chainParams)
 	amountPerOutput := totalInput / int64(numOutputs)
 	remainder := totalInput - amountPerOutput*int64(numOutputs)
+	txOuts := make([]*wire.TxOut, 0, numOutputs)
 	for i := uint32(0); i < numOutputs; i++ {
 		// Ensure the final output accounts for any remainder that might
 		// be left from splitting the input amount.
@@ -174,12 +180,13 @@ func (p *poolHarness) CreateCoinbaseTx(blockHeight int32, numOutputs uint32) (*b
 		if i == numOutputs-1 {
 			amount = amountPerOutput + remainder
 		}
-		tx.AddTxOut(&wire.TxOut{
+		txOuts = append(txOuts, &wire.TxOut{
 			PkScript: p.payScript,
 			Value:    amount,
 		})
 	}
 
+	tx := wire.NewMsgTx(wire.TxVersion, txIns, txOuts, 0)
 	return btcutil.NewTx(tx), nil
 }
 
@@ -201,18 +208,23 @@ func (p *poolHarness) CreateSignedTx(inputs []spendableOutput,
 	amountPerOutput := int64(totalInput) / int64(numOutputs)
 	remainder := int64(totalInput) - amountPerOutput*int64(numOutputs)
 
-	tx := wire.NewMsgTx(wire.TxVersion)
 	sequence := wire.MaxTxInSequenceNum
 	if signalsReplacement {
 		sequence = MaxRBFSequence
 	}
+
+	// Collect inputs.
+	txIns := make([]*wire.TxIn, 0, len(inputs))
 	for _, input := range inputs {
-		tx.AddTxIn(&wire.TxIn{
+		txIns = append(txIns, &wire.TxIn{
 			PreviousOutPoint: input.outPoint,
 			SignatureScript:  nil,
 			Sequence:         sequence,
 		})
 	}
+
+	// Collect outputs.
+	txOuts := make([]*wire.TxOut, 0, numOutputs)
 	for i := uint32(0); i < numOutputs; i++ {
 		// Ensure the final output accounts for any remainder that might
 		// be left from splitting the input amount.
@@ -220,21 +232,26 @@ func (p *poolHarness) CreateSignedTx(inputs []spendableOutput,
 		if i == numOutputs-1 {
 			amount = amountPerOutput + remainder
 		}
-		tx.AddTxOut(&wire.TxOut{
+		txOuts = append(txOuts, &wire.TxOut{
 			PkScript: p.payScript,
 			Value:    amount,
 		})
 	}
 
+	tx := wire.NewMsgTx(wire.TxVersion, txIns, txOuts, 0)
+
 	// Sign the new transaction.
-	for i := range tx.TxIn {
+	for i := range tx.TxIn() {
 		sigScript, err := txscript.SignatureScript(tx, i, p.payScript,
 			txscript.SigHashAll, p.signKey, true)
 		if err != nil {
 			return nil, err
 		}
-		tx.TxIn[i].SignatureScript = sigScript
+		txIns[i].SignatureScript = sigScript
 	}
+
+	// Re-create tx with signed inputs.
+	tx = wire.NewMsgTx(wire.TxVersion, txIns, txOuts, 0)
 
 	return btcutil.NewTx(tx), nil
 }
@@ -251,16 +268,16 @@ func (p *poolHarness) CreateTxChain(firstOutput spendableOutput, numTxns uint32)
 		// Create the transaction using the previous transaction output
 		// and paying the full amount to the payment address associated
 		// with the harness.
-		tx := wire.NewMsgTx(wire.TxVersion)
-		tx.AddTxIn(&wire.TxIn{
+		txIn := &wire.TxIn{
 			PreviousOutPoint: prevOutPoint,
 			SignatureScript:  nil,
 			Sequence:         wire.MaxTxInSequenceNum,
-		})
-		tx.AddTxOut(&wire.TxOut{
+		}
+		txOut := &wire.TxOut{
 			PkScript: p.payScript,
 			Value:    int64(spendableAmount),
-		})
+		}
+		tx := wire.NewMsgTx(wire.TxVersion, []*wire.TxIn{txIn}, []*wire.TxOut{txOut}, 0)
 
 		// Sign the new transaction.
 		sigScript, err := txscript.SignatureScript(tx, 0, p.payScript,
@@ -268,7 +285,10 @@ func (p *poolHarness) CreateTxChain(firstOutput spendableOutput, numTxns uint32)
 		if err != nil {
 			return nil, err
 		}
-		tx.TxIn[0].SignatureScript = sigScript
+		txIn.SignatureScript = sigScript
+
+		// Re-create tx with signed input.
+		tx = wire.NewMsgTx(wire.TxVersion, []*wire.TxIn{txIn}, []*wire.TxOut{txOut}, 0)
 
 		txChain = append(txChain, btcutil.NewTx(tx))
 

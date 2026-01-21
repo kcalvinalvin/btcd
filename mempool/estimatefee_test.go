@@ -50,9 +50,9 @@ func (eft *estimateFeeTester) testTx(fee btcutil.Amount) *TxDesc {
 	eft.version++
 	return &TxDesc{
 		TxDesc: mining.TxDesc{
-			Tx: btcutil.NewTx(&wire.MsgTx{
-				Version: eft.version,
-			}),
+			Tx: btcutil.NewTx(wire.NewMsgTx(
+				eft.version, nil, nil, 0,
+			)),
 			Height: eft.height,
 			Fee:    int64(fee),
 		},

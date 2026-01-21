@@ -217,7 +217,8 @@ func (mp *TxPool) removeOrphan(tx *btcutil.Tx, removeRedeemers bool) {
 	}
 
 	// Remove the reference from the previous orphan index.
-	for _, txIn := range otx.tx.MsgTx().TxIn {
+	msgTx := otx.tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		orphans, exists := mp.orphansByPrev[txIn.PreviousOutPoint]
 		if exists {
 			delete(orphans, *txHash)
@@ -233,7 +234,7 @@ func (mp *TxPool) removeOrphan(tx *btcutil.Tx, removeRedeemers bool) {
 	// Remove any orphans that redeem outputs from this one if requested.
 	if removeRedeemers {
 		prevOut := wire.OutPoint{Hash: *txHash}
-		for txOutIdx := range tx.MsgTx().TxOut {
+		for txOutIdx := range tx.MsgTx().TxOut() {
 			prevOut.Index = uint32(txOutIdx)
 			for _, orphan := range mp.orphansByPrev[prevOut] {
 				mp.removeOrphan(orphan, true)
@@ -344,7 +345,8 @@ func (mp *TxPool) addOrphan(tx *btcutil.Tx, tag Tag) {
 		tag:        tag,
 		expiration: time.Now().Add(orphanTTL),
 	}
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		if _, exists := mp.orphansByPrev[txIn.PreviousOutPoint]; !exists {
 			mp.orphansByPrev[txIn.PreviousOutPoint] =
 				make(map[chainhash.Hash]*btcutil.Tx)
@@ -393,7 +395,7 @@ func (mp *TxPool) maybeAddOrphan(tx *btcutil.Tx, tag Tag) error {
 // This function MUST be called with the mempool lock held (for writes).
 func (mp *TxPool) removeOrphanDoubleSpends(tx *btcutil.Tx) {
 	msgTx := tx.MsgTx()
-	for _, txIn := range msgTx.TxIn {
+	for _, txIn := range msgTx.TxIn() {
 		for _, orphan := range mp.orphansByPrev[txIn.PreviousOutPoint] {
 			mp.removeOrphan(orphan, true)
 		}
@@ -479,7 +481,7 @@ func (mp *TxPool) removeTransaction(tx *btcutil.Tx, removeRedeemers bool) {
 	txHash := tx.Hash()
 	if removeRedeemers {
 		// Remove any transactions which rely on this one.
-		for i := uint32(0); i < uint32(len(tx.MsgTx().TxOut)); i++ {
+		for i := uint32(0); i < uint32(len(tx.MsgTx().TxOut())); i++ {
 			prevOut := wire.OutPoint{Hash: *txHash, Index: i}
 			if txRedeemer, exists := mp.outpoints[prevOut]; exists {
 				mp.removeTransaction(txRedeemer, true)
@@ -496,7 +498,8 @@ func (mp *TxPool) removeTransaction(tx *btcutil.Tx, removeRedeemers bool) {
 		}
 
 		// Mark the referenced outpoints as unspent by the pool.
-		for _, txIn := range txDesc.Tx.MsgTx().TxIn {
+		descMsgTx := txDesc.Tx.MsgTx()
+		for _, txIn := range descMsgTx.TxIn() {
 			delete(mp.outpoints, txIn.PreviousOutPoint)
 		}
 		delete(mp.pool, *txHash)
@@ -527,7 +530,8 @@ func (mp *TxPool) RemoveTransaction(tx *btcutil.Tx, removeRedeemers bool) {
 func (mp *TxPool) RemoveDoubleSpends(tx *btcutil.Tx) {
 	// Protect concurrent access.
 	mp.mtx.Lock()
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		if txRedeemer, ok := mp.outpoints[txIn.PreviousOutPoint]; ok {
 			if !txRedeemer.Hash().IsEqual(tx.Hash()) {
 				mp.removeTransaction(txRedeemer, true)
@@ -557,7 +561,8 @@ func (mp *TxPool) addTransaction(utxoView *blockchain.UtxoViewpoint, tx *btcutil
 	}
 
 	mp.pool[*tx.Hash()] = txD
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		mp.outpoints[txIn.PreviousOutPoint] = tx
 	}
 	atomic.StoreInt64(&mp.lastUpdated, time.Now().Unix())
@@ -587,7 +592,8 @@ func (mp *TxPool) addTransaction(utxoView *blockchain.UtxoViewpoint, tx *btcutil
 // This function MUST be called with the mempool lock held (for reads).
 func (mp *TxPool) checkPoolDoubleSpend(tx *btcutil.Tx) (bool, error) {
 	var isReplacement bool
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		conflict, ok := mp.outpoints[txIn.PreviousOutPoint]
 		if !ok {
 			continue
@@ -634,7 +640,8 @@ func (mp *TxPool) signalsReplacement(tx *btcutil.Tx,
 		cache = make(map[chainhash.Hash]struct{})
 	}
 
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		if txIn.Sequence <= MaxRBFSequence {
 			return true
 		}
@@ -681,7 +688,8 @@ func (mp *TxPool) txAncestors(tx *btcutil.Tx,
 	}
 
 	ancestors := make(map[chainhash.Hash]*btcutil.Tx)
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		parent, ok := mp.pool[txIn.PreviousOutPoint.Hash]
 		if !ok {
 			continue
@@ -723,7 +731,8 @@ func (mp *TxPool) txDescendants(tx *btcutil.Tx,
 	// if they are spent by any other mempool transactions.
 	descendants := make(map[chainhash.Hash]*btcutil.Tx)
 	op := wire.OutPoint{Hash: *tx.Hash()}
-	for i := range tx.MsgTx().TxOut {
+	msgTx := tx.MsgTx()
+	for i := range msgTx.TxOut() {
 		op.Index = uint32(i)
 		descendant, ok := mp.outpoints[op]
 		if !ok {
@@ -759,7 +768,8 @@ func (mp *TxPool) txDescendants(tx *btcutil.Tx,
 // This function MUST be called with the mempool lock held (for reads).
 func (mp *TxPool) txConflicts(tx *btcutil.Tx) map[chainhash.Hash]*btcutil.Tx {
 	conflicts := make(map[chainhash.Hash]*btcutil.Tx)
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		conflict, ok := mp.outpoints[txIn.PreviousOutPoint]
 		if !ok {
 			continue
@@ -795,7 +805,8 @@ func (mp *TxPool) fetchInputUtxos(tx *btcutil.Tx) (*blockchain.UtxoViewpoint, er
 	}
 
 	// Attempt to populate any missing inputs from the transaction pool.
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		prevOut := &txIn.PreviousOutPoint
 		entry := utxoView.LookupEntry(*prevOut)
 		if entry != nil && !entry.IsSpent() {
@@ -889,7 +900,8 @@ func (mp *TxPool) validateReplacement(tx *btcutil.Tx,
 
 		// We'll track each conflict's parents to ensure the replacement
 		// isn't spending any new unconfirmed inputs.
-		for _, txIn := range conflict.MsgTx().TxIn {
+		conflictMsgTx := conflict.MsgTx()
+		for _, txIn := range conflictMsgTx.TxIn() {
 			conflictsParents[txIn.PreviousOutPoint.Hash] = struct{}{}
 		}
 	}
@@ -908,7 +920,8 @@ func (mp *TxPool) validateReplacement(tx *btcutil.Tx,
 	// Finally, it should not spend any new unconfirmed outputs, other than
 	// the ones already included in the parents of the conflicting
 	// transactions it'll replace.
-	for _, txIn := range tx.MsgTx().TxIn {
+	txMsgTx := tx.MsgTx()
+	for _, txIn := range txMsgTx.TxIn() {
 		if _, ok := conflictsParents[txIn.PreviousOutPoint.Hash]; ok {
 			continue
 		}
@@ -1006,7 +1019,8 @@ func (mp *TxPool) processOrphans(acceptedTx *btcutil.Tx) []*TxDesc {
 		processItem := firstElement.(*btcutil.Tx)
 
 		prevOut := wire.OutPoint{Hash: *processItem.Hash()}
-		for txOutIdx := range processItem.MsgTx().TxOut {
+		processItemMsgTx := processItem.MsgTx()
+		for txOutIdx := range processItemMsgTx.TxOut() {
 			// Look up all orphans that redeem the output that is
 			// now available.  This will typically only be one, but
 			// it could be multiple if the orphan pool contains
@@ -1244,8 +1258,9 @@ func (mp *TxPool) RawMempoolVerbose() map[string]*btcjson.GetRawMempoolVerboseRe
 				bestHeight+1)
 		}
 
+		msgTx := tx.MsgTx()
 		mpd := &btcjson.GetRawMempoolVerboseResult{
-			Size:             int32(tx.MsgTx().SerializeSize()),
+			Size:             int32(msgTx.SerializeSize()),
 			Vsize:            int32(GetTxVirtualSize(tx)),
 			Weight:           int32(blockchain.GetTransactionWeight(tx)),
 			Fee:              btcutil.Amount(desc.Fee).ToBTC(),
@@ -1255,7 +1270,7 @@ func (mp *TxPool) RawMempoolVerbose() map[string]*btcjson.GetRawMempoolVerboseRe
 			CurrentPriority:  currentPriority,
 			Depends:          make([]string, 0),
 		}
-		for _, txIn := range tx.MsgTx().TxIn {
+		for _, txIn := range msgTx.TxIn() {
 			hash := &txIn.PreviousOutPoint.Hash
 			if mp.haveTransaction(hash) {
 				mpd.Depends = append(mpd.Depends,
@@ -1421,7 +1436,8 @@ func (mp *TxPool) checkMempoolAcceptance(tx *btcutil.Tx,
 	// Don't allow the transaction if it exists in the main chain and is
 	// already fully spent.
 	prevOut := wire.OutPoint{Hash: *txHash}
-	for txOutIdx := range tx.MsgTx().TxOut {
+	checkMsgTx := tx.MsgTx()
+	for txOutIdx := range checkMsgTx.TxOut() {
 		prevOut.Index = uint32(txOutIdx)
 
 		entry := utxoView.LookupEntry(prevOut)
