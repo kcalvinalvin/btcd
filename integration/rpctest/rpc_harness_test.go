@@ -539,7 +539,12 @@ func testMemWalletLockedOutputs(r *Harness, t *testing.T) {
 	// Now unlocked all the spent inputs within the unbroadcast signed
 	// transaction. The current balance should now be exactly that of the
 	// starting balance.
-	r.UnlockOutputs(tx.TxIn)
+	origTxIns := tx.TxIn()
+	txIns := make([]*wire.TxIn, len(origTxIns))
+	for i := range origTxIns {
+		txIns[i] = &origTxIns[i]
+	}
+	r.UnlockOutputs(txIns)
 	currentBalance = r.ConfirmedBalance()
 	if currentBalance != startingBalance {
 		t.Fatalf("current and starting balance should now match: "+

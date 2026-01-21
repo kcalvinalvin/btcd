@@ -638,7 +638,7 @@ func (m *wsNotificationManager) subscribedClients(tx *btcutil.Tx,
 	subscribed := make(map[chan struct{}]struct{})
 
 	msgTx := tx.MsgTx()
-	for _, input := range msgTx.TxIn {
+	for _, input := range msgTx.TxIn() {
 		for quitChan, wsc := range clients {
 			wsc.Lock()
 			filter := wsc.filterData
@@ -654,7 +654,7 @@ func (m *wsNotificationManager) subscribedClients(tx *btcutil.Tx,
 		}
 	}
 
-	for i, output := range msgTx.TxOut {
+	for i, output := range msgTx.TxOut() {
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 			output.PkScript, m.server.cfg.ChainParams)
 		if err != nil {
@@ -826,7 +826,7 @@ func (m *wsNotificationManager) notifyForNewTx(clients map[chan struct{}]*wsClie
 	mtx := tx.MsgTx()
 
 	var amount int64
-	for _, txOut := range mtx.TxOut {
+	for _, txOut := range mtx.TxOut() {
 		amount += txOut.Value
 	}
 
@@ -997,7 +997,8 @@ func (m *wsNotificationManager) notifyForTxOuts(ops map[wire.OutPoint]map[chan s
 
 	txHex := ""
 	wscNotified := make(map[chan struct{}]struct{})
-	for i, txOut := range tx.MsgTx().TxOut {
+	msgTx := tx.MsgTx()
+	for i, txOut := range msgTx.TxOut() {
 		_, txAddrs, _, err := txscript.ExtractPkScriptAddrs(
 			txOut.PkScript, m.server.cfg.ChainParams)
 		if err != nil {
@@ -1011,7 +1012,7 @@ func (m *wsNotificationManager) notifyForTxOuts(ops map[wire.OutPoint]map[chan s
 			}
 
 			if txHex == "" {
-				txHex = txHexString(tx.MsgTx())
+				txHex = txHexString(msgTx)
 			}
 			ntfn := btcjson.NewRecvTxNtfn(txHex, blockDetails(block,
 				tx.Index()))
@@ -1086,11 +1087,12 @@ func (m *wsNotificationManager) notifyForTxIns(ops map[wire.OutPoint]map[chan st
 
 	txHex := ""
 	wscNotified := make(map[chan struct{}]struct{})
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		prevOut := &txIn.PreviousOutPoint
 		if cmap, ok := ops[*prevOut]; ok {
 			if txHex == "" {
-				txHex = txHexString(tx.MsgTx())
+				txHex = txHexString(msgTx)
 			}
 			marshalledJSON, err := newRedeemingTxNotification(txHex, tx.Index(), block)
 			if err != nil {
@@ -2316,7 +2318,8 @@ func rescanBlock(wsc *wsClient, lookups *rescanKeys, blk *btcutil.Block) {
 
 		// We'll start by iterating over the transaction's inputs to
 		// determine if it spends an outpoint/script in our filter list.
-		for _, txin := range tx.MsgTx().TxIn {
+		txMsgTx := tx.MsgTx()
+		for _, txin := range txMsgTx.TxIn() {
 			// If it spends an outpoint, we'll dispatch a spend
 			// notification for the transaction.
 			if _, ok := lookups.unspent[txin.PreviousOutPoint]; ok {
@@ -2382,7 +2385,7 @@ func rescanBlock(wsc *wsClient, lookups *rescanKeys, blk *btcutil.Block) {
 			}
 		}
 
-		for txOutIdx, txout := range tx.MsgTx().TxOut {
+		for txOutIdx, txout := range txMsgTx.TxOut() {
 			_, addrs, _, _ := txscript.ExtractPkScriptAddrs(
 				txout.PkScript, wsc.server.cfg.ChainParams)
 
@@ -2443,7 +2446,7 @@ func rescanBlockFilter(filter *wsClientFilter, block *btcutil.Block, params *cha
 
 		// Scan inputs if not a coinbase transaction.
 		if !blockchain.IsCoinBaseTx(msgTx) {
-			for _, input := range msgTx.TxIn {
+			for _, input := range msgTx.TxIn() {
 				if !filter.existsUnspentOutPoint(&input.PreviousOutPoint) {
 					continue
 				}
@@ -2457,7 +2460,7 @@ func rescanBlockFilter(filter *wsClientFilter, block *btcutil.Block, params *cha
 		}
 
 		// Scan outputs.
-		for i, output := range msgTx.TxOut {
+		for i, output := range msgTx.TxOut() {
 			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 				output.PkScript, params)
 			if err != nil {

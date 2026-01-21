@@ -534,9 +534,14 @@ func handleCreateRawTransaction(s *rpcServer, cmd interface{}, closeChan <-chan 
 		}
 	}
 
-	// Add all transaction inputs to a new transaction after performing
-	// some validity checks.
-	mtx := wire.NewMsgTx(wire.TxVersion)
+	// Determine the locktime value.
+	var lockTime uint32
+	if c.LockTime != nil {
+		lockTime = uint32(*c.LockTime)
+	}
+
+	// Collect all transaction inputs after performing some validity checks.
+	txIns := make([]*wire.TxIn, 0, len(c.Inputs))
 	for _, input := range c.Inputs {
 		txHash, err := chainhash.NewHashFromStr(input.Txid)
 		if err != nil {
@@ -548,12 +553,12 @@ func handleCreateRawTransaction(s *rpcServer, cmd interface{}, closeChan <-chan 
 		if c.LockTime != nil && *c.LockTime != 0 {
 			txIn.Sequence = wire.MaxTxInSequenceNum - 1
 		}
-		mtx.AddTxIn(txIn)
+		txIns = append(txIns, txIn)
 	}
 
-	// Add all transaction outputs to the transaction after performing
-	// some validity checks.
+	// Collect all transaction outputs after performing some validity checks.
 	params := s.cfg.ChainParams
+	txOuts := make([]*wire.TxOut, 0, len(c.Amounts))
 	for encodedAddr, amount := range c.Amounts {
 		// Ensure amount is in the valid range for monetary amounts.
 		if amount <= 0 || amount*btcutil.SatoshiPerBitcoin > btcutil.MaxSatoshi {
@@ -607,13 +612,11 @@ func handleCreateRawTransaction(s *rpcServer, cmd interface{}, closeChan <-chan 
 		}
 
 		txOut := wire.NewTxOut(int64(satoshi), pkScript)
-		mtx.AddTxOut(txOut)
+		txOuts = append(txOuts, txOut)
 	}
 
-	// Set the Locktime, if given.
-	if c.LockTime != nil {
-		mtx.LockTime = uint32(*c.LockTime)
-	}
+	// Create the transaction with all inputs, outputs, and locktime.
+	mtx := wire.NewMsgTx(wire.TxVersion, txIns, txOuts, lockTime)
 
 	// Return the serialized and hex-encoded transaction.  Note that this
 	// is intentionally not directly returning because the first return
@@ -651,16 +654,16 @@ func handleDebugLevel(s *rpcServer, cmd interface{}, closeChan <-chan struct{}) 
 // transaction.
 func createVinList(mtx *wire.MsgTx) []btcjson.Vin {
 	// Coinbase transactions only have a single txin by definition.
-	vinList := make([]btcjson.Vin, len(mtx.TxIn))
+	vinList := make([]btcjson.Vin, len(mtx.TxIn()))
 	if blockchain.IsCoinBaseTx(mtx) {
-		txIn := mtx.TxIn[0]
+		txIn := mtx.TxIn()[0]
 		vinList[0].Coinbase = hex.EncodeToString(txIn.SignatureScript)
 		vinList[0].Sequence = txIn.Sequence
 		vinList[0].Witness = txIn.Witness.ToHexStrings()
 		return vinList
 	}
 
-	for i, txIn := range mtx.TxIn {
+	for i, txIn := range mtx.TxIn() {
 		// The disassembled string will contain [error] inline
 		// if the script doesn't fully parse, so ignore the
 		// error here.
@@ -686,8 +689,8 @@ func createVinList(mtx *wire.MsgTx) []btcjson.Vin {
 // createVoutList returns a slice of JSON objects for the outputs of the passed
 // transaction.
 func createVoutList(mtx *wire.MsgTx, chainParams *chaincfg.Params, filterAddrMap map[string]struct{}) []btcjson.Vout {
-	voutList := make([]btcjson.Vout, 0, len(mtx.TxOut))
-	for i, v := range mtx.TxOut {
+	voutList := make([]btcjson.Vout, 0, len(mtx.TxOut()))
+	for i, v := range mtx.TxOut() {
 		// The disassembled string will contain [error] inline if the
 		// script doesn't fully parse, so ignore the error here.
 		disbuf, _ := txscript.DisasmString(v.PkScript)
@@ -1654,7 +1657,29 @@ func (state *gbtWorkState) updateBlockTemplate(s *rpcServer, useCoinbaseValue bo
 				context := "Failed to create pay-to-addr script"
 				return internalRPCError(err.Error(), context)
 			}
-			template.Block.Transactions[0].TxOut[0].PkScript = pkScript
+
+			// Rebuild the coinbase transaction with the new pkScript.
+			origCoinbase := template.Block.Transactions[0]
+			origCoinbaseIns := origCoinbase.TxIn()
+			newTxIns := make([]*wire.TxIn, len(origCoinbaseIns))
+			for i := range origCoinbaseIns {
+				newTxIns[i] = &origCoinbaseIns[i]
+			}
+			origCoinbaseOuts := origCoinbase.TxOut()
+			newTxOuts := make([]*wire.TxOut, len(origCoinbaseOuts))
+			for i := range origCoinbaseOuts {
+				if i == 0 {
+					// Update the first output with the new pkScript.
+					newTxOuts[i] = &wire.TxOut{
+						Value:    origCoinbaseOuts[i].Value,
+						PkScript: pkScript,
+					}
+				} else {
+					newTxOuts[i] = &origCoinbaseOuts[i]
+				}
+			}
+			newCoinbase := wire.NewMsgTx(origCoinbase.Version, newTxIns, newTxOuts, origCoinbase.LockTime)
+			template.Block.Transactions[0] = newCoinbase
 			template.ValidPayAddress = true
 
 			// Update the merkle root.
@@ -1729,7 +1754,7 @@ func (state *gbtWorkState) blockTemplateResult(useCoinbaseValue bool, submitOld 
 		// before creating the final array to prevent duplicate entries
 		// when multiple inputs reference the same transaction.
 		dependsMap := make(map[int64]struct{})
-		for _, txIn := range tx.TxIn {
+		for _, txIn := range tx.TxIn() {
 			if idx, ok := txIndex[txIn.PreviousOutPoint.Hash]; ok {
 				dependsMap[idx] = struct{}{}
 			}
@@ -1792,7 +1817,8 @@ func (state *gbtWorkState) blockTemplateResult(useCoinbaseValue bool, submitOld 
 
 	if useCoinbaseValue {
 		reply.CoinbaseAux = gbtCoinbaseAux
-		reply.CoinbaseValue = &msgBlock.Transactions[0].TxOut[0].Value
+		coinbaseTxOut := msgBlock.Transactions[0].TxOut()[0]
+		reply.CoinbaseValue = &coinbaseTxOut.Value
 	} else {
 		// Ensure the template has a valid payment address associated
 		// with it when a full coinbase is requested.
@@ -2770,7 +2796,7 @@ func handleGetTxOut(s *rpcServer, cmd interface{}, closeChan <-chan struct{}) (i
 		}
 
 		mtx := tx.MsgTx()
-		if c.Vout > uint32(len(mtx.TxOut)-1) {
+		if c.Vout > uint32(len(mtx.TxOut())-1) {
 			return nil, &btcjson.RPCError{
 				Code: btcjson.ErrRPCInvalidTxVout,
 				Message: "Output index number (vout) does not " +
@@ -2778,12 +2804,13 @@ func handleGetTxOut(s *rpcServer, cmd interface{}, closeChan <-chan struct{}) (i
 			}
 		}
 
-		txOut := mtx.TxOut[c.Vout]
-		if txOut == nil {
+		txOuts := mtx.TxOut()
+		if c.Vout >= uint32(len(txOuts)) {
 			errStr := fmt.Sprintf("Output index: %d for txid: %s "+
 				"does not exist", c.Vout, txHash)
 			return nil, internalRPCError(errStr, "")
 		}
+		txOut := txOuts[c.Vout]
 
 		best := s.cfg.Chain.BestSnapshot()
 		bestBlockHash = best.Hash.String()
@@ -2943,21 +2970,22 @@ type retrievedTx struct {
 func fetchInputTxos(s *rpcServer, tx *wire.MsgTx) (map[wire.OutPoint]wire.TxOut, error) {
 	mp := s.cfg.TxMemPool
 	originOutputs := make(map[wire.OutPoint]wire.TxOut)
-	for txInIndex, txIn := range tx.TxIn {
+	for txInIndex, txIn := range tx.TxIn() {
 		// Attempt to fetch and use the referenced transaction from the
 		// memory pool.
 		origin := &txIn.PreviousOutPoint
 		originTx, err := mp.FetchTransaction(&origin.Hash)
 		if err == nil {
-			txOuts := originTx.MsgTx().TxOut
-			if origin.Index >= uint32(len(txOuts)) {
+			originMsgTx := originTx.MsgTx()
+			if origin.Index >= uint32(len(originMsgTx.TxOut())) {
 				errStr := fmt.Sprintf("unable to find output "+
 					"%v referenced from transaction %s:%d",
 					origin, tx.TxHash(), txInIndex)
 				return nil, internalRPCError(errStr, "")
 			}
 
-			originOutputs[*origin] = *txOuts[origin.Index]
+			txOut := originMsgTx.TxOut()[origin.Index]
+			originOutputs[*origin] = txOut
 			continue
 		}
 
@@ -2991,13 +3019,14 @@ func fetchInputTxos(s *rpcServer, tx *wire.MsgTx) (map[wire.OutPoint]wire.TxOut,
 		}
 
 		// Add the referenced output to the map.
-		if origin.Index >= uint32(len(msgTx.TxOut)) {
+		if origin.Index >= uint32(len(msgTx.TxOut())) {
 			errStr := fmt.Sprintf("unable to find output %v "+
 				"referenced from transaction %s:%d", origin,
 				tx.TxHash(), txInIndex)
 			return nil, internalRPCError(errStr, "")
 		}
-		originOutputs[*origin] = *msgTx.TxOut[origin.Index]
+		txOut := msgTx.TxOut()[origin.Index]
+		originOutputs[*origin] = txOut
 	}
 
 	return originOutputs, nil
@@ -3015,7 +3044,7 @@ func createVinListPrevOut(s *rpcServer, mtx *wire.MsgTx, chainParams *chaincfg.P
 			return nil, nil
 		}
 
-		txIn := mtx.TxIn[0]
+		txIn := mtx.TxIn()[0]
 		vinList := make([]btcjson.VinPrevOut, 1)
 		vinList[0].Coinbase = hex.EncodeToString(txIn.SignatureScript)
 		vinList[0].Sequence = txIn.Sequence
@@ -3023,7 +3052,7 @@ func createVinListPrevOut(s *rpcServer, mtx *wire.MsgTx, chainParams *chaincfg.P
 	}
 
 	// Use a dynamically sized list to accommodate the address filter.
-	vinList := make([]btcjson.VinPrevOut, 0, len(mtx.TxIn))
+	vinList := make([]btcjson.VinPrevOut, 0, len(mtx.TxIn()))
 
 	// Lookup all of the referenced transaction outputs needed to populate
 	// the previous output information if requested.
@@ -3036,7 +3065,7 @@ func createVinListPrevOut(s *rpcServer, mtx *wire.MsgTx, chainParams *chaincfg.P
 		}
 	}
 
-	for _, txIn := range mtx.TxIn {
+	for _, txIn := range mtx.TxIn() {
 		// The disassembled string will contain [error] inline
 		// if the script doesn't fully parse, so ignore the
 		// error here.

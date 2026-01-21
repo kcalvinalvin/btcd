@@ -75,7 +75,8 @@ func makeTestOutput(r *rpctest.Harness, t *testing.T,
 	// generated above, this is needed in order to create a proper utxo for
 	// this output.
 	var outputIndex uint32
-	if bytes.Equal(fundTx.TxOut[0].PkScript, selfAddrScript) {
+	txOut0 := fundTx.TxOut()[0]
+	if bytes.Equal(txOut0.PkScript, selfAddrScript) {
 		outputIndex = 0
 	} else {
 		outputIndex = 1
@@ -139,32 +140,40 @@ func TestBIP0113Activation(t *testing.T) {
 		t.Fatalf("unable to generate addr script: %v", err)
 	}
 
-	// Now create a transaction with a lock time which is "final" according
-	// to the latest block, but not according to the current median time
-	// past.
-	tx := wire.NewMsgTx(1)
-	tx.AddTxIn(&wire.TxIn{
-		PreviousOutPoint: *testOutput,
-	})
-	tx.AddTxOut(&wire.TxOut{
-		PkScript: addrScript,
-		Value:    outputValue - 1000,
-	})
-
 	// We set the lock-time of the transaction to just one minute after the
 	// current MTP of the chain.
 	chainInfo, err := r.Client.GetBlockChainInfo()
 	if err != nil {
 		t.Fatalf("unable to query for chain info: %v", err)
 	}
-	tx.LockTime = uint32(chainInfo.MedianTime) + 1
+	lockTime := uint32(chainInfo.MedianTime) + 1
 
-	sigScript, err := txscript.SignatureScript(tx, 0, testPkScript,
+	// Now create a transaction with a lock time which is "final" according
+	// to the latest block, but not according to the current median time
+	// past.
+	txIn := &wire.TxIn{
+		PreviousOutPoint: *testOutput,
+	}
+	txOut := &wire.TxOut{
+		PkScript: addrScript,
+		Value:    outputValue - 1000,
+	}
+
+	// Create unsigned transaction for signing.
+	unsignedTx := wire.NewMsgTx(1, []*wire.TxIn{txIn}, []*wire.TxOut{txOut}, lockTime)
+
+	sigScript, err := txscript.SignatureScript(unsignedTx, 0, testPkScript,
 		txscript.SigHashAll, outputKey, true)
 	if err != nil {
 		t.Fatalf("unable to generate sig: %v", err)
 	}
-	tx.TxIn[0].SignatureScript = sigScript
+
+	// Create signed transaction (Sequence must match the unsigned tx).
+	signedTxIn := &wire.TxIn{
+		PreviousOutPoint: *testOutput,
+		SignatureScript:  sigScript,
+	}
+	tx := wire.NewMsgTx(1, []*wire.TxIn{signedTxIn}, []*wire.TxOut{txOut}, lockTime)
 
 	// This transaction should be rejected from the mempool as using MTP
 	// for transactions finality is now a policy rule. Additionally, the
@@ -237,21 +246,29 @@ func TestBIP0113Activation(t *testing.T) {
 
 		// Create a new transaction with a lock-time past the current known
 		// MTP.
-		tx = wire.NewMsgTx(1)
-		tx.AddTxIn(&wire.TxIn{
+		loopLockTime := uint32(medianTimePast + timeLockDelta)
+		loopTxIn := &wire.TxIn{
 			PreviousOutPoint: *testOutput,
-		})
-		tx.AddTxOut(&wire.TxOut{
+		}
+		loopTxOut := &wire.TxOut{
 			PkScript: addrScript,
 			Value:    outputValue - 1000,
-		})
-		tx.LockTime = uint32(medianTimePast + timeLockDelta)
-		sigScript, err = txscript.SignatureScript(tx, 0, testPkScript,
+		}
+
+		// Create unsigned transaction for signing.
+		unsignedLoopTx := wire.NewMsgTx(1, []*wire.TxIn{loopTxIn}, []*wire.TxOut{loopTxOut}, loopLockTime)
+		sigScript, err = txscript.SignatureScript(unsignedLoopTx, 0, testPkScript,
 			txscript.SigHashAll, outputKey, true)
 		if err != nil {
 			t.Fatalf("unable to generate sig: %v", err)
 		}
-		tx.TxIn[0].SignatureScript = sigScript
+
+		// Create signed transaction (Sequence must match the unsigned tx).
+		signedLoopTxIn := &wire.TxIn{
+			PreviousOutPoint: *testOutput,
+			SignatureScript:  sigScript,
+		}
+		tx = wire.NewMsgTx(1, []*wire.TxIn{signedLoopTxIn}, []*wire.TxOut{loopTxOut}, loopLockTime)
 
 		// If the time-lock delta is greater than -1, then the
 		// transaction should be rejected from the mempool and when
@@ -324,7 +341,8 @@ func createCSVOutput(r *rpctest.Harness, t *testing.T,
 	}
 
 	var outputIndex uint32
-	if !bytes.Equal(tx.TxOut[0].PkScript, p2shScript) {
+	txOut0 := tx.TxOut()[0]
+	if !bytes.Equal(txOut0.PkScript, p2shScript) {
 		outputIndex = 1
 	}
 
@@ -343,13 +361,6 @@ func spendCSVOutput(redeemScript []byte, csvUTXO *wire.OutPoint,
 	sequence uint32, targetOutput *wire.TxOut,
 	txVersion int32) (*wire.MsgTx, error) {
 
-	tx := wire.NewMsgTx(txVersion)
-	tx.AddTxIn(&wire.TxIn{
-		PreviousOutPoint: *csvUTXO,
-		Sequence:         sequence,
-	})
-	tx.AddTxOut(targetOutput)
-
 	b := txscript.NewScriptBuilder().
 		AddOp(txscript.OP_TRUE).
 		AddData(redeemScript)
@@ -358,7 +369,14 @@ func spendCSVOutput(redeemScript []byte, csvUTXO *wire.OutPoint,
 	if err != nil {
 		return nil, err
 	}
-	tx.TxIn[0].SignatureScript = sigScript
+
+	txIn := &wire.TxIn{
+		PreviousOutPoint: *csvUTXO,
+		SignatureScript:  sigScript,
+		Sequence:         sequence,
+	}
+
+	tx := wire.NewMsgTx(txVersion, []*wire.TxIn{txIn}, []*wire.TxOut{targetOutput}, 0)
 
 	return tx, nil
 }

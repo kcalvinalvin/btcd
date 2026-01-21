@@ -211,8 +211,8 @@ func (m *memWallet) ingestBlock(update *chainUpdate) {
 		mtx := tx.MsgTx()
 		isCoinbase := blockchain.IsCoinBaseTx(mtx)
 		txHash := mtx.TxHash()
-		m.evalOutputs(mtx.TxOut, &txHash, isCoinbase, undo)
-		m.evalInputs(mtx.TxIn, undo)
+		m.evalOutputs(mtx, &txHash, isCoinbase, undo)
+		m.evalInputs(mtx, undo)
 	}
 
 	// Finally, record the undo entry for this block so we can
@@ -247,12 +247,12 @@ func (m *memWallet) chainSyncer() {
 	}
 }
 
-// evalOutputs evaluates each of the passed outputs, creating a new matching
+// evalOutputs evaluates each of the transaction outputs, creating a new matching
 // utxo within the wallet if we're able to spend the output.
-func (m *memWallet) evalOutputs(outputs []*wire.TxOut, txHash *chainhash.Hash,
+func (m *memWallet) evalOutputs(mtx *wire.MsgTx, txHash *chainhash.Hash,
 	isCoinbase bool, undo *undoEntry) {
 
-	for i, output := range outputs {
+	for i, output := range mtx.TxOut() {
 		pkScript := output.PkScript
 
 		// Scan all the addresses we currently control to see if the
@@ -283,10 +283,10 @@ func (m *memWallet) evalOutputs(outputs []*wire.TxOut, txHash *chainhash.Hash,
 	}
 }
 
-// evalInputs scans all the passed inputs, destroying any utxos within the
+// evalInputs scans all the transaction inputs, destroying any utxos within the
 // wallet which are spent by an input.
-func (m *memWallet) evalInputs(inputs []*wire.TxIn, undo *undoEntry) {
-	for _, txIn := range inputs {
+func (m *memWallet) evalInputs(mtx *wire.MsgTx, undo *undoEntry) {
+	for _, txIn := range mtx.TxIn() {
 		op := txIn.PreviousOutPoint
 		oldUtxo, ok := m.utxos[op]
 		if !ok {
@@ -379,9 +379,11 @@ func (m *memWallet) NewAddress() (btcutil.Address, error) {
 // satoshis-per-byte. The transaction being funded can optionally include a
 // change output indicated by the change boolean.
 //
+// It returns the selected inputs and optionally a change output.
+//
 // NOTE: The memWallet's mutex must be held when this function is called.
-func (m *memWallet) fundTx(tx *wire.MsgTx, amt btcutil.Amount,
-	feeRate btcutil.Amount, change bool) error {
+func (m *memWallet) fundTx(outputs []*wire.TxOut, amt btcutil.Amount,
+	feeRate btcutil.Amount, change bool) ([]*wire.TxIn, *wire.TxOut, error) {
 
 	const (
 		// spendSize is the largest number of bytes of a sigScript
@@ -391,7 +393,7 @@ func (m *memWallet) fundTx(tx *wire.MsgTx, amt btcutil.Amount,
 
 	var (
 		amtSelected btcutil.Amount
-		txSize      int
+		txIns       []*wire.TxIn
 	)
 
 	for outPoint, utxo := range m.utxos {
@@ -403,15 +405,25 @@ func (m *memWallet) fundTx(tx *wire.MsgTx, amt btcutil.Amount,
 
 		amtSelected += utxo.value
 
-		// Add the selected output to the transaction, updating the
-		// current tx size while accounting for the size of the future
-		// sigScript.
-		tx.AddTxIn(wire.NewTxIn(&outPoint, nil, nil))
-		txSize = tx.SerializeSize() + spendSize*len(tx.TxIn)
+		// Add the selected output to the transaction inputs.
+		txIns = append(txIns, wire.NewTxIn(&outPoint, nil, nil))
+
+		// Estimate transaction size: base size with outputs + inputs with sigScripts.
+		// Base transaction overhead is about 10 bytes (version + locktime + counts).
+		txSize := 10
+		for _, out := range outputs {
+			txSize += 8 + 1 + len(out.PkScript) // value + varint + script
+		}
+		// Add change output size estimate if we might need change.
+		if change {
+			txSize += 8 + 1 + 25 // value + varint + p2pkh script
+		}
+		// Add input sizes with sigScript.
+		txSize += len(txIns) * (32 + 4 + 1 + spendSize + 4) // outpoint + varint + sigScript + sequence
 
 		// Calculate the fee required for the txn at this point
 		// observing the specified fee rate. If we don't have enough
-		// coins from he current amount selected to pay the fee, then
+		// coins from the current amount selected to pay the fee, then
 		// continue to grab more coins.
 		reqFee := btcutil.Amount(txSize * int(feeRate))
 		if amtSelected-reqFee < amt {
@@ -425,25 +437,25 @@ func (m *memWallet) fundTx(tx *wire.MsgTx, amt btcutil.Amount,
 		if changeVal > 0 && change {
 			addr, err := m.newAddress()
 			if err != nil {
-				return err
+				return nil, nil, err
 			}
 			pkScript, err := txscript.PayToAddrScript(addr)
 			if err != nil {
-				return err
+				return nil, nil, err
 			}
 			changeOutput := &wire.TxOut{
 				Value:    int64(changeVal),
 				PkScript: pkScript,
 			}
-			tx.AddTxOut(changeOutput)
+			return txIns, changeOutput, nil
 		}
 
-		return nil
+		return txIns, nil, nil
 	}
 
 	// If we've reached this point, then coin selection failed due to an
 	// insufficient amount of coins.
-	return fmt.Errorf("not enough funds for coin selection")
+	return nil, nil, fmt.Errorf("not enough funds for coin selection")
 }
 
 // SendOutputs creates, then sends a transaction paying to the specified output
@@ -486,26 +498,36 @@ func (m *memWallet) CreateTransaction(outputs []*wire.TxOut,
 	m.Lock()
 	defer m.Unlock()
 
-	tx := wire.NewMsgTx(wire.TxVersion)
-
 	// Tally up the total amount to be sent in order to perform coin
 	// selection shortly below.
 	var outputAmt btcutil.Amount
 	for _, output := range outputs {
 		outputAmt += btcutil.Amount(output.Value)
-		tx.AddTxOut(output)
 	}
 
 	// Attempt to fund the transaction with spendable utxos.
-	if err := m.fundTx(tx, outputAmt, feeRate, change); err != nil {
+	txIns, changeOutput, err := m.fundTx(outputs, outputAmt, feeRate, change)
+	if err != nil {
 		return nil, err
 	}
+
+	// Build the final outputs list, including change if present.
+	txOuts := make([]*wire.TxOut, 0, len(outputs)+1)
+	txOuts = append(txOuts, outputs...)
+	if changeOutput != nil {
+		txOuts = append(txOuts, changeOutput)
+	}
+
+	// Create the unsigned transaction.
+	tx := wire.NewMsgTx(wire.TxVersion, txIns, txOuts, 0)
 
 	// Populate all the selected inputs with valid sigScript for spending.
 	// Along the way record all outputs being spent in order to avoid a
 	// potential double spend.
-	spentOutputs := make([]*utxo, 0, len(tx.TxIn))
-	for i, txIn := range tx.TxIn {
+	currentTxIns := tx.TxIn()
+	spentOutputs := make([]*utxo, 0, len(currentTxIns))
+	signedTxIns := make([]*wire.TxIn, len(currentTxIns))
+	for i, txIn := range currentTxIns {
 		outPoint := txIn.PreviousOutPoint
 		utxo := m.utxos[outPoint]
 
@@ -527,10 +549,18 @@ func (m *memWallet) CreateTransaction(outputs []*wire.TxOut,
 			return nil, err
 		}
 
-		txIn.SignatureScript = sigScript
+		// Update the input with the signature script by rebuilding.
+		signedTxIns[i] = &wire.TxIn{
+			PreviousOutPoint: txIn.PreviousOutPoint,
+			SignatureScript:  sigScript,
+			Sequence:         txIn.Sequence,
+		}
 
 		spentOutputs = append(spentOutputs, utxo)
 	}
+
+	// Rebuild the transaction with signed inputs.
+	tx = wire.NewMsgTx(wire.TxVersion, signedTxIns, txOuts, 0)
 
 	// As these outputs are now being spent by this newly created
 	// transaction, mark the outputs are "locked". This action ensures

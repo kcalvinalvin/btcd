@@ -38,7 +38,8 @@ func TestGetTxSpendingPrevOut(t *testing.T) {
 
 	// Create a tx and testing outpoints.
 	tx := createTxInMempool(t, r)
-	opInMempool := tx.TxIn[0].PreviousOutPoint
+	txIn0 := tx.TxIn()[0]
+	opInMempool := txIn0.PreviousOutPoint
 	opNotInMempool := wire.OutPoint{
 		Hash:  tx.TxHash(),
 		Index: 0,
@@ -112,13 +113,6 @@ func createTxInMempool(t *testing.T, r *rpctest.Harness) *wire.MsgTx {
 	)
 	require.NoError(t, err)
 
-	// Create a new transaction with a lock-time past the current known
-	// MTP.
-	tx := wire.NewMsgTx(1)
-	tx.AddTxIn(&wire.TxIn{
-		PreviousOutPoint: *testOutput,
-	})
-
 	// Fetch a fresh address from the harness, we'll use this address to
 	// send funds back into the Harness.
 	addr, err := r.NewAddress()
@@ -127,16 +121,29 @@ func createTxInMempool(t *testing.T, r *rpctest.Harness) *wire.MsgTx {
 	addrScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
-	tx.AddTxOut(&wire.TxOut{
+	// Build the transaction inputs and outputs.
+	txIn := &wire.TxIn{
+		PreviousOutPoint: *testOutput,
+	}
+	txOut := &wire.TxOut{
 		PkScript: addrScript,
 		Value:    outputValue - 1000,
-	})
+	}
+
+	// Create an unsigned transaction first for signing.
+	unsignedTx := wire.NewMsgTx(1, []*wire.TxIn{txIn}, []*wire.TxOut{txOut}, 0)
 
 	sigScript, err := txscript.SignatureScript(
-		tx, 0, testPkScript, txscript.SigHashAll, outputKey, true,
+		unsignedTx, 0, testPkScript, txscript.SigHashAll, outputKey, true,
 	)
 	require.NoError(t, err)
-	tx.TxIn[0].SignatureScript = sigScript
+
+	// Create the signed transaction (Sequence must match the unsigned tx).
+	signedTxIn := &wire.TxIn{
+		PreviousOutPoint: *testOutput,
+		SignatureScript:  sigScript,
+	}
+	tx := wire.NewMsgTx(1, []*wire.TxIn{signedTxIn}, []*wire.TxOut{txOut}, 0)
 
 	// Send the tx.
 	_, err = r.Client.SendRawTransaction(tx, true)

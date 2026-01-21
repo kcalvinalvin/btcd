@@ -170,7 +170,7 @@ func messageSummary(msg wire.Message) string {
 
 	case *wire.MsgTx:
 		return fmt.Sprintf("hash %s, %d inputs, %d outputs, lock %s",
-			msg.TxHash(), len(msg.TxIn), len(msg.TxOut),
+			msg.TxHash(), len(msg.TxIn()), len(msg.TxOut()),
 			formatLockTime(msg.LockTime))
 
 	case *wire.MsgBlock:

@@ -106,25 +106,29 @@ func createCoinbaseTx(coinbaseScript []byte, nextBlockHeight int32,
 		return nil, err
 	}
 
-	tx := wire.NewMsgTx(wire.TxVersion)
-	tx.AddTxIn(&wire.TxIn{
-		// Coinbase transactions have no inputs, so previous outpoint is
-		// zero hash and max index.
+	// Coinbase transactions have no inputs, so previous outpoint is
+	// zero hash and max index.
+	txIns := []*wire.TxIn{{
 		PreviousOutPoint: *wire.NewOutPoint(&chainhash.Hash{},
 			wire.MaxPrevOutIndex),
 		SignatureScript: coinbaseScript,
 		Sequence:        wire.MaxTxInSequenceNum,
-	})
+	}}
+
+	var txOuts []*wire.TxOut
 	if len(mineTo) == 0 {
-		tx.AddTxOut(&wire.TxOut{
+		txOuts = []*wire.TxOut{{
 			Value:    blockchain.CalcBlockSubsidy(nextBlockHeight, net),
 			PkScript: pkScript,
-		})
+		}}
 	} else {
+		txOuts = make([]*wire.TxOut, len(mineTo))
 		for i := range mineTo {
-			tx.AddTxOut(&mineTo[i])
+			txOuts[i] = &mineTo[i]
 		}
 	}
+
+	tx := wire.NewMsgTx(wire.TxVersion, txIns, txOuts, 0)
 	return btcutil.NewTx(tx), nil
 }
 
