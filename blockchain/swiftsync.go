@@ -45,7 +45,7 @@ func (s *utxoCache) swiftSyncConnectTransactions(b *BlockChain, block *btcutil.B
 		isCoinBase := IsCoinBase(tx)
 		prevOut := wire.OutPoint{Hash: *tx.Hash()}
 
-		for txOutIdx, txOut := range tx.MsgTx().TxOut {
+		for txOutIdx, txOut := range tx.MsgTx().TxOut() {
 			// Check bitmap - bit 0 means unspent, bit 1 means spent
 			isSpent := b.getSwiftSyncBitmapBit(b.swiftSyncBitIdx)
 			b.swiftSyncBitIdx++
@@ -58,7 +58,7 @@ func (s *utxoCache) swiftSyncConnectTransactions(b *BlockChain, block *btcutil.B
 			// Add unspent output to cache
 			// addTxOut handles skipping unspendable outputs internally
 			prevOut.Index = uint32(txOutIdx)
-			err := s.addTxOut(prevOut, txOut, isCoinBase, block.Height())
+			err := s.addTxOut(prevOut, &txOut, isCoinBase, block.Height())
 			if err != nil {
 				return err
 			}

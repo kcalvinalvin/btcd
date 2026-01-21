@@ -721,12 +721,13 @@ func (idx *AddrIndex) indexBlock(data writeIndexData, block *btcutil.Block,
 
 	stxoIndex := 0
 	for txIdx, tx := range block.Transactions() {
+		msgTx := tx.MsgTx()
 		// Coinbases do not reference any inputs.  Since the block is
 		// required to have already gone through full validation, it has
 		// already been proven on the first transaction in the block is
 		// a coinbase.
 		if txIdx != 0 {
-			for range tx.MsgTx().TxIn {
+			for range msgTx.TxIn() {
 				// We'll access the slice of all the
 				// transactions spent in this block properly
 				// ordered to fetch the previous input script.
@@ -739,8 +740,9 @@ func (idx *AddrIndex) indexBlock(data writeIndexData, block *btcutil.Block,
 			}
 		}
 
-		for _, txOut := range tx.MsgTx().TxOut {
-			idx.indexPkScript(data, txOut.PkScript, txIdx)
+		txOuts := msgTx.TxOut()
+		for i := range txOuts {
+			idx.indexPkScript(data, txOuts[i].PkScript, txIdx)
 		}
 	}
 }
@@ -902,7 +904,8 @@ func (idx *AddrIndex) AddUnconfirmedTx(tx *btcutil.Tx, utxoView *blockchain.Utxo
 	// The existence checks are elided since this is only called after the
 	// transaction has already been validated and thus all inputs are
 	// already known to exist.
-	for _, txIn := range tx.MsgTx().TxIn {
+	msgTx := tx.MsgTx()
+	for _, txIn := range msgTx.TxIn() {
 		entry := utxoView.LookupEntry(txIn.PreviousOutPoint)
 		if entry == nil {
 			// Ignore missing entries.  This should never happen
@@ -914,8 +917,9 @@ func (idx *AddrIndex) AddUnconfirmedTx(tx *btcutil.Tx, utxoView *blockchain.Utxo
 	}
 
 	// Index addresses of all created outputs.
-	for _, txOut := range tx.MsgTx().TxOut {
-		idx.indexUnconfirmedAddresses(txOut.PkScript, tx)
+	txOuts := msgTx.TxOut()
+	for i := range txOuts {
+		idx.indexUnconfirmedAddresses(txOuts[i].PkScript, tx)
 	}
 }
 

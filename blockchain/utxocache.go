@@ -378,14 +378,14 @@ func (s *utxoCache) addTxOuts(tx *btcutil.Tx, blockHeight int32) error {
 	// provably unspendable.
 	isCoinBase := IsCoinBase(tx)
 	prevOut := wire.OutPoint{Hash: *tx.Hash()}
-	for txOutIdx, txOut := range tx.MsgTx().TxOut {
+	for txOutIdx, txOut := range tx.MsgTx().TxOut() {
 		// Update existing entries.  All fields are updated because it's
 		// possible (although extremely unlikely) that the existing
 		// entry is being replaced by a different transaction with the
 		// same hash.  This is allowed so long as the previous
 		// transaction is fully spent.
 		prevOut.Index = uint32(txOutIdx)
-		err := s.addTxOut(prevOut, txOut, isCoinBase, blockHeight)
+		err := s.addTxOut(prevOut, &txOut, isCoinBase, blockHeight)
 		if err != nil {
 			return err
 		}
@@ -455,8 +455,9 @@ func (s *utxoCache) addTxIns(tx *btcutil.Tx, stxos *[]SpentTxOut) error {
 		return nil
 	}
 
-	for _, txIn := range tx.MsgTx().TxIn {
-		err := s.addTxIn(txIn, stxos)
+	txIns := tx.MsgTx().TxIn()
+	for i := range txIns {
+		err := s.addTxIn(&txIns[i], stxos)
 		if err != nil {
 			return err
 		}

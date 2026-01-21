@@ -200,12 +200,12 @@ func ExtractWitnessCommitment(tx *btcutil.Tx) ([]byte, bool) {
 		return nil, false
 	}
 
-	msgTx := tx.MsgTx()
-	for i := len(msgTx.TxOut) - 1; i >= 0; i-- {
+	txOuts := tx.MsgTx().TxOut()
+	for i := len(txOuts) - 1; i >= 0; i-- {
 		// The public key script that contains the witness commitment
 		// must shared a prefix with the WitnessMagicBytes, and be at
 		// least 38 bytes.
-		pkScript := msgTx.TxOut[i].PkScript
+		pkScript := txOuts[i].PkScript
 		if len(pkScript) >= CoinbaseWitnessPkScriptLength &&
 			bytes.HasPrefix(pkScript, WitnessMagicBytes) {
 
@@ -215,7 +215,7 @@ func ExtractWitnessCommitment(tx *btcutil.Tx) ([]byte, bool) {
 			// meaning.
 			start := len(WitnessMagicBytes)
 			end := CoinbaseWitnessPkScriptLength
-			return msgTx.TxOut[i].PkScript[start:end], true
+			return pkScript[start:end], true
 		}
 	}
 
@@ -235,7 +235,8 @@ func ValidateWitnessCommitment(blk *btcutil.Block) error {
 	}
 
 	coinbaseTx := blk.Transactions()[0]
-	if len(coinbaseTx.MsgTx().TxIn) == 0 {
+	coinbaseTxIns := coinbaseTx.MsgTx().TxIn()
+	if len(coinbaseTxIns) == 0 {
 		return ruleError(ErrNoTxInputs, "transaction has no inputs")
 	}
 
@@ -260,7 +261,7 @@ func ValidateWitnessCommitment(blk *btcutil.Block) error {
 	// coinbase transaction MUST have exactly one witness element within
 	// its witness data and that element must be exactly
 	// CoinbaseWitnessDataLen bytes.
-	coinbaseWitness := coinbaseTx.MsgTx().TxIn[0].Witness
+	coinbaseWitness := coinbaseTxIns[0].Witness
 	if len(coinbaseWitness) != 1 {
 		str := fmt.Sprintf("the coinbase transaction has %d items in "+
 			"its witness stack when only one is allowed",

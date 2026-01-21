@@ -58,9 +58,9 @@ var (
 			Bits:       0x207fffff,               // 545259519 [7fffff0000000000000000000000000000000000000000000000000000000000]
 			Nonce:      2,
 		},
-		Transactions: []*wire.MsgTx{{
-			Version: 1,
-			TxIn: []*wire.TxIn{{
+		Transactions: []*wire.MsgTx{wire.NewMsgTx(
+			1,
+			[]*wire.TxIn{{
 				PreviousOutPoint: wire.OutPoint{
 					Hash:  chainhash.Hash{},
 					Index: 0xffffffff,
@@ -72,7 +72,7 @@ var (
 					"206261696c6f757420666f72206261686b73"),
 				Sequence: 0xffffffff,
 			}},
-			TxOut: []*wire.TxOut{{
+			[]*wire.TxOut{{
 				Value: 0,
 				PkScript: fromHex("4104678afdb0fe5548271967f1" +
 					"a67130b7105cd6a828e03909a67962e0ea1f" +
@@ -80,8 +80,8 @@ var (
 					"c4f35504e51ec112de5c384df7ba0b8d578a" +
 					"4c702b6bf11d5fac"),
 			}},
-			LockTime: 0,
-		}},
+			0,
+		)},
 	}
 )
 

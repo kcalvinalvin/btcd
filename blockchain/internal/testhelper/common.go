@@ -28,21 +28,22 @@ var (
 // script which avoids the need to track addresses and signature scripts in the
 // tests.
 func CreateSpendTx(spend *SpendableOut, fee btcutil.Amount) *wire.MsgTx {
-	spendTx := wire.NewMsgTx(1)
-	spendTx.AddTxIn(&wire.TxIn{
-		PreviousOutPoint: spend.PrevOut,
-		Sequence:         wire.MaxTxInSequenceNum,
-		SignatureScript:  nil,
-	})
-	spendTx.AddTxOut(wire.NewTxOut(int64(spend.Amount-fee),
-		OpTrueScript))
 	opRetScript, err := UniqueOpReturnScript()
 	if err != nil {
 		panic(err)
 	}
-	spendTx.AddTxOut(wire.NewTxOut(0, opRetScript))
 
-	return spendTx
+	txIn := []*wire.TxIn{{
+		PreviousOutPoint: spend.PrevOut,
+		Sequence:         wire.MaxTxInSequenceNum,
+		SignatureScript:  nil,
+	}}
+	txOut := []*wire.TxOut{
+		wire.NewTxOut(int64(spend.Amount-fee), OpTrueScript),
+		wire.NewTxOut(0, opRetScript),
+	}
+
+	return wire.NewMsgTx(1, txIn, txOut, 0)
 }
 
 // CreateCoinbaseTx returns a coinbase transaction paying an appropriate
@@ -55,20 +56,20 @@ func CreateCoinbaseTx(blockHeight int32, blockSubsidy int64) *wire.MsgTx {
 		panic(err)
 	}
 
-	tx := wire.NewMsgTx(1)
-	tx.AddTxIn(&wire.TxIn{
+	txIn := []*wire.TxIn{{
 		// Coinbase transactions have no inputs, so previous outpoint is
 		// zero hash and max index.
 		PreviousOutPoint: *wire.NewOutPoint(&chainhash.Hash{},
 			wire.MaxPrevOutIndex),
 		Sequence:        wire.MaxTxInSequenceNum,
 		SignatureScript: coinbaseScript,
-	})
-	tx.AddTxOut(&wire.TxOut{
+	}}
+	txOut := []*wire.TxOut{{
 		Value:    blockSubsidy,
 		PkScript: OpTrueScript,
-	})
-	return tx
+	}}
+
+	return wire.NewMsgTx(1, txIn, txOut, 0)
 }
 
 // StandardCoinbaseScript returns a standard script suitable for use as the
@@ -113,12 +114,13 @@ type SpendableOut struct {
 // MakeSpendableOutForTx returns a spendable output for the given transaction
 // and transaction output index within the transaction.
 func MakeSpendableOutForTx(tx *wire.MsgTx, txOutIndex uint32) SpendableOut {
+	txOut := tx.TxOut()[txOutIndex]
 	return SpendableOut{
 		PrevOut: wire.OutPoint{
 			Hash:  tx.TxHash(),
 			Index: txOutIndex,
 		},
-		Amount: btcutil.Amount(tx.TxOut[txOutIndex].Value),
+		Amount: btcutil.Amount(txOut.Value),
 	}
 }
 

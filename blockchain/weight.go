@@ -91,8 +91,7 @@ func GetSigOpCost(tx *btcutil.Tx, isCoinBaseTx bool, utxoView *UtxoViewpoint, bi
 	}
 
 	if segWit && !isCoinBaseTx {
-		msgTx := tx.MsgTx()
-		for txInIndex, txIn := range msgTx.TxIn {
+		for txInIndex, txIn := range tx.MsgTx().TxIn() {
 			// Ensure the referenced output is available and hasn't
 			// already been spent.
 			utxo := utxoView.LookupEntry(txIn.PreviousOutPoint)

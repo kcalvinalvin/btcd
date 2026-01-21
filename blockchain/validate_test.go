@@ -173,10 +173,8 @@ func TestCheckBlockSanity(t *testing.T) {
 // various serialized heights and also does negative tests to ensure errors
 // and handled properly.
 func TestCheckSerializedHeight(t *testing.T) {
-	// Create an empty coinbase template to be used in the tests below.
+	// Create a coinbase outpoint to be used in the tests below.
 	coinbaseOutpoint := wire.NewOutPoint(&chainhash.Hash{}, math.MaxUint32)
-	coinbaseTx := wire.NewMsgTx(1)
-	coinbaseTx.AddTxIn(wire.NewTxIn(coinbaseOutpoint, nil, nil))
 
 	// Expected rule errors.
 	missingHeightError := RuleError{
@@ -211,8 +209,9 @@ func TestCheckSerializedHeight(t *testing.T) {
 
 	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
-		msgTx := coinbaseTx.Copy()
-		msgTx.TxIn[0].SignatureScript = test.sigScript
+		// Create a coinbase transaction with the test signature script.
+		txIn := wire.NewTxIn(coinbaseOutpoint, test.sigScript, nil)
+		msgTx := wire.NewMsgTx(1, []*wire.TxIn{txIn}, nil, 0)
 		tx := btcutil.NewTx(msgTx)
 
 		err := CheckSerializedHeight(tx, test.wantHeight)
@@ -256,9 +255,9 @@ var Block100000 = wire.MsgBlock{
 		Nonce:     0x10572b0f,               // 274148111
 	},
 	Transactions: []*wire.MsgTx{
-		{
-			Version: 1,
-			TxIn: []*wire.TxIn{
+		// Transaction 0: Coinbase
+		wire.NewMsgTx(1,
+			[]*wire.TxIn{
 				{
 					PreviousOutPoint: wire.OutPoint{
 						Hash:  chainhash.Hash{},
@@ -270,7 +269,7 @@ var Block100000 = wire.MsgBlock{
 					Sequence: 0xffffffff,
 				},
 			},
-			TxOut: []*wire.TxOut{
+			[]*wire.TxOut{
 				{
 					Value: 0x12a05f200, // 5000000000
 					PkScript: []byte{
@@ -288,11 +287,11 @@ var Block100000 = wire.MsgBlock{
 					},
 				},
 			},
-			LockTime: 0,
-		},
-		{
-			Version: 1,
-			TxIn: []*wire.TxIn{
+			0,
+		),
+		// Transaction 1
+		wire.NewMsgTx(1,
+			[]*wire.TxIn{
 				{
 					PreviousOutPoint: wire.OutPoint{
 						Hash: chainhash.Hash([32]byte{ // Make go vet happy.
@@ -329,7 +328,7 @@ var Block100000 = wire.MsgBlock{
 					Sequence: 0xffffffff,
 				},
 			},
-			TxOut: []*wire.TxOut{
+			[]*wire.TxOut{
 				{
 					Value: 0x2123e300, // 556000000
 					PkScript: []byte{
@@ -357,11 +356,11 @@ var Block100000 = wire.MsgBlock{
 					},
 				},
 			},
-			LockTime: 0,
-		},
-		{
-			Version: 1,
-			TxIn: []*wire.TxIn{
+			0,
+		),
+		// Transaction 2
+		wire.NewMsgTx(1,
+			[]*wire.TxIn{
 				{
 					PreviousOutPoint: wire.OutPoint{
 						Hash: chainhash.Hash([32]byte{ // Make go vet happy.
@@ -369,7 +368,7 @@ var Block100000 = wire.MsgBlock{
 							0x9f, 0x9a, 0x75, 0x69, 0xab, 0x16, 0xa3, 0x27,
 							0x86, 0xaf, 0x7d, 0x7e, 0x2d, 0xe0, 0x92, 0x65,
 							0xe4, 0x1c, 0x61, 0xd0, 0x78, 0x29, 0x4e, 0xcf,
-						}), // cf4e2978d0611ce46592e02d7e7daf8627a316ab69759a9f3df109a7f2bf3ec3
+						}), // cf4e2978d0611ce46592e02d7e7daf8627a316ab69759a9f3df109a9f2bf3ec3
 						Index: 1,
 					},
 					SignatureScript: []byte{
@@ -397,7 +396,7 @@ var Block100000 = wire.MsgBlock{
 					Sequence: 0xffffffff,
 				},
 			},
-			TxOut: []*wire.TxOut{
+			[]*wire.TxOut{
 				{
 					Value: 0xf4240, // 1000000
 					PkScript: []byte{
@@ -425,11 +424,11 @@ var Block100000 = wire.MsgBlock{
 					},
 				},
 			},
-			LockTime: 0,
-		},
-		{
-			Version: 1,
-			TxIn: []*wire.TxIn{
+			0,
+		),
+		// Transaction 3
+		wire.NewMsgTx(1,
+			[]*wire.TxIn{
 				{
 					PreviousOutPoint: wire.OutPoint{
 						Hash: chainhash.Hash([32]byte{ // Make go vet happy.
@@ -466,7 +465,7 @@ var Block100000 = wire.MsgBlock{
 					Sequence: 0xffffffff,
 				},
 			},
-			TxOut: []*wire.TxOut{
+			[]*wire.TxOut{
 				{
 					Value: 0xf4240, // 1000000
 					PkScript: []byte{
@@ -481,7 +480,7 @@ var Block100000 = wire.MsgBlock{
 					},
 				},
 			},
-			LockTime: 0,
-		},
+			0,
+		),
 	},
 }

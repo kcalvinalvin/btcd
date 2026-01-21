@@ -41,7 +41,7 @@ func makeHashes(size int) []*chainhash.Hash {
 func makeTxs(size int) []*btcutil.Tx {
 	var txs = make([]*btcutil.Tx, size)
 	for i := range txs {
-		tx := btcutil.NewTx(wire.NewMsgTx(2))
+		tx := btcutil.NewTx(wire.NewMsgTx(2, nil, nil, 0))
 		tx.Hash()
 		txs[i] = tx
 	}

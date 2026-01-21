@@ -410,7 +410,8 @@ func (b *BlockChain) calcSequenceLock(node *blockNode, tx *btcutil.Tx, utxoView 
 	// inputs present in the mempool.
 	nextHeight := node.height + 1
 
-	for txInIndex, txIn := range mTx.TxIn {
+	txIns := mTx.TxIn()
+	for txInIndex, txIn := range txIns {
 		utxo := utxoView.LookupEntry(txIn.PreviousOutPoint)
 		if utxo == nil {
 			str := fmt.Sprintf("output %v referenced from "+
@@ -866,7 +867,7 @@ func countSpentOutputs(block *btcutil.Block) int {
 	// Exclude the coinbase transaction since it can't spend anything.
 	var numSpent int
 	for _, tx := range block.Transactions()[1:] {
-		numSpent += len(tx.MsgTx().TxIn)
+		numSpent += tx.MsgTx().InputCount()
 	}
 	return numSpent
 }

@@ -39,7 +39,7 @@ func BenchmarkUtxoFetchMap(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		needed := make(map[wire.OutPoint]struct{}, len(transactions))
 		for _, tx := range transactions[1:] {
-			for _, txIn := range tx.TxIn {
+			for _, txIn := range tx.TxIn() {
 				needed[txIn.PreviousOutPoint] = struct{}{}
 			}
 		}
@@ -54,7 +54,7 @@ func BenchmarkUtxoFetchSlices(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		needed := make([]wire.OutPoint, 0, len(transactions))
 		for _, tx := range transactions[1:] {
-			for _, txIn := range tx.TxIn {
+			for _, txIn := range tx.TxIn() {
 				needed = append(needed, txIn.PreviousOutPoint)
 			}
 		}

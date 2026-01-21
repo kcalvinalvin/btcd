@@ -43,6 +43,68 @@ const (
 	numLargeReorgBlocks = 1088
 )
 
+// rebuildTxWithOutput creates a new transaction with the output at the specified
+// index replaced with the provided output. All other inputs and outputs are
+// copied from the original transaction.
+func rebuildTxWithOutput(origTx *wire.MsgTx, outputIdx int, newOutput *wire.TxOut) *wire.MsgTx {
+	origTxIns := origTx.TxIn()
+	newTxIns := make([]*wire.TxIn, len(origTxIns))
+	for i := range origTxIns {
+		newTxIns[i] = &origTxIns[i]
+	}
+	origTxOuts := origTx.TxOut()
+	newTxOuts := make([]*wire.TxOut, len(origTxOuts))
+	for i := range origTxOuts {
+		if i == outputIdx {
+			newTxOuts[i] = newOutput
+		} else {
+			newTxOuts[i] = &origTxOuts[i]
+		}
+	}
+	return wire.NewMsgTx(origTx.Version, newTxIns, newTxOuts, origTx.LockTime)
+}
+
+// rebuildTxWithInput creates a new transaction with the input at the specified
+// index replaced with the provided input. All other inputs and outputs are
+// copied from the original transaction.
+func rebuildTxWithInput(origTx *wire.MsgTx, inputIdx int, newInput *wire.TxIn) *wire.MsgTx {
+	origTxIns := origTx.TxIn()
+	newTxIns := make([]*wire.TxIn, len(origTxIns))
+	for i := range origTxIns {
+		if i == inputIdx {
+			newTxIns[i] = newInput
+		} else {
+			newTxIns[i] = &origTxIns[i]
+		}
+	}
+	origTxOuts := origTx.TxOut()
+	newTxOuts := make([]*wire.TxOut, len(origTxOuts))
+	for i := range origTxOuts {
+		newTxOuts[i] = &origTxOuts[i]
+	}
+	return wire.NewMsgTx(origTx.Version, newTxIns, newTxOuts, origTx.LockTime)
+}
+
+// rebuildTxWithLockTimeAndInput creates a new transaction with a different lock time
+// and the input at the specified index replaced with the provided input.
+func rebuildTxWithLockTimeAndInput(origTx *wire.MsgTx, lockTime uint32, inputIdx int, newInput *wire.TxIn) *wire.MsgTx {
+	origTxIns := origTx.TxIn()
+	newTxIns := make([]*wire.TxIn, len(origTxIns))
+	for i := range origTxIns {
+		if i == inputIdx {
+			newTxIns[i] = newInput
+		} else {
+			newTxIns[i] = &origTxIns[i]
+		}
+	}
+	origTxOuts := origTx.TxOut()
+	newTxOuts := make([]*wire.TxOut, len(origTxOuts))
+	for i := range origTxOuts {
+		newTxOuts[i] = &origTxOuts[i]
+	}
+	return wire.NewMsgTx(origTx.Version, newTxIns, newTxOuts, lockTime)
+}
+
 // TestInstance is an interface that describes a specific test instance returned
 // by the tests generated in this package.  It should be type asserted to one
 // of the concrete test instance types in order to test accordingly.
@@ -247,8 +309,13 @@ func calcMerkleRoot(txns []*wire.MsgTx) chainhash.Hash {
 func additionalCoinbase(amount btcutil.Amount) func(*wire.MsgBlock) {
 	return func(b *wire.MsgBlock) {
 		// Increase the first proof-of-work coinbase subsidy by the
-		// provided amount.
-		b.Transactions[0].TxOut[0].Value += int64(amount)
+		// provided amount. Rebuild the transaction with the new value.
+		origTx := b.Transactions[0]
+		txOut0 := origTx.TxOut()[0]
+		b.Transactions[0] = rebuildTxWithOutput(origTx, 0, &wire.TxOut{
+			Value:    txOut0.Value + int64(amount),
+			PkScript: txOut0.PkScript,
+		})
 	}
 }
 
@@ -260,13 +327,18 @@ func additionalCoinbase(amount btcutil.Amount) func(*wire.MsgBlock) {
 func additionalSpendFee(fee btcutil.Amount) func(*wire.MsgBlock) {
 	return func(b *wire.MsgBlock) {
 		// Increase the fee of the spending transaction by reducing the
-		// amount paid.
-		if int64(fee) > b.Transactions[1].TxOut[0].Value {
+		// amount paid. Rebuild the transaction with the new value.
+		origTx := b.Transactions[1]
+		txOut0 := origTx.TxOut()[0]
+		if int64(fee) > txOut0.Value {
 			panic(fmt.Sprintf("additionalSpendFee: fee of %d "+
 				"exceeds available spend transaction value",
 				fee))
 		}
-		b.Transactions[1].TxOut[0].Value -= int64(fee)
+		b.Transactions[1] = rebuildTxWithOutput(origTx, 0, &wire.TxOut{
+			Value:    txOut0.Value - int64(fee),
+			PkScript: txOut0.PkScript,
+		})
 	}
 }
 
@@ -274,7 +346,12 @@ func additionalSpendFee(fee btcutil.Amount) func(*wire.MsgBlock) {
 // it by replacing the public key script of the spending transaction.
 func replaceSpendScript(pkScript []byte) func(*wire.MsgBlock) {
 	return func(b *wire.MsgBlock) {
-		b.Transactions[1].TxOut[0].PkScript = pkScript
+		origTx := b.Transactions[1]
+		txOut0 := origTx.TxOut()[0]
+		b.Transactions[1] = rebuildTxWithOutput(origTx, 0, &wire.TxOut{
+			Value:    txOut0.Value,
+			PkScript: pkScript,
+		})
 	}
 }
 
@@ -282,7 +359,14 @@ func replaceSpendScript(pkScript []byte) func(*wire.MsgBlock) {
 // modifies it by replacing the signature key script of the coinbase.
 func replaceCoinbaseSigScript(script []byte) func(*wire.MsgBlock) {
 	return func(b *wire.MsgBlock) {
-		b.Transactions[0].TxIn[0].SignatureScript = script
+		origTx := b.Transactions[0]
+		origTxIn := origTx.TxIn()[0]
+		b.Transactions[0] = rebuildTxWithInput(origTx, 0, &wire.TxIn{
+			PreviousOutPoint: origTxIn.PreviousOutPoint,
+			SignatureScript:  script,
+			Sequence:         origTxIn.Sequence,
+			Witness:          origTxIn.Witness,
+		})
 	}
 }
 
@@ -333,7 +417,12 @@ func (g *testGenerator) nextBlock(blockName string, spend *testhelper.SpendableO
 		// Create the transaction with a fee of 1 atom for the
 		// miner and increase the coinbase subsidy accordingly.
 		fee := btcutil.Amount(1)
-		coinbaseTx.TxOut[0].Value += int64(fee)
+		txOut0 := coinbaseTx.TxOut()[0]
+		coinbaseTx = rebuildTxWithOutput(coinbaseTx, 0, &wire.TxOut{
+			Value:    txOut0.Value + int64(fee),
+			PkScript: txOut0.PkScript,
+		})
+		txns[0] = coinbaseTx
 
 		// Create a transaction that spends from the provided spendable
 		// output and includes an additional unique OP_RETURN output to
@@ -521,12 +610,13 @@ func assertScriptSigOpsCount(script []byte, expected int) {
 func countBlockSigOps(block *wire.MsgBlock) int {
 	totalSigOps := 0
 	for _, tx := range block.Transactions {
-		for _, txIn := range tx.TxIn {
+		for _, txIn := range tx.TxIn() {
 			numSigOps := txscript.GetSigOpCount(txIn.SignatureScript)
 			totalSigOps += numSigOps
 		}
-		for _, txOut := range tx.TxOut {
-			numSigOps := txscript.GetSigOpCount(txOut.PkScript)
+		txOuts := tx.TxOut()
+		for i := range txOuts {
+			numSigOps := txscript.GetSigOpCount(txOuts[i].PkScript)
 			totalSigOps += numSigOps
 		}
 	}
@@ -612,13 +702,13 @@ func (g *testGenerator) assertTipBlockTxOutOpReturn(txIndex, txOutIndex uint32) 
 	}
 
 	tx := g.tip.Transactions[txIndex]
-	if txOutIndex >= uint32(len(tx.TxOut)) {
+	if txOutIndex >= uint32(len(tx.TxOut())) {
 		panic(fmt.Sprintf("transaction index %d output %d in block %q "+
 			"(height %d) does not exist", txIndex, txOutIndex,
 			g.tipName, g.tipHeight))
 	}
 
-	txOut := tx.TxOut[txOutIndex]
+	txOut := tx.TxOut()[txOutIndex]
 	if txOut.PkScript[0] != txscript.OP_RETURN {
 		panic(fmt.Sprintf("transaction index %d output %d in block %q "+
 			"(height %d) is not an OP_RETURN", txIndex, txOutIndex,
@@ -1168,8 +1258,18 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 		prevTx := b.Transactions[1]
 		for i := 0; i < txnsNeeded; i++ {
 			prevTx = createSpendTxForTx(prevTx, testhelper.LowFee)
-			prevTx.TxOut[0].Value -= 2
-			prevTx.AddTxOut(wire.NewTxOut(2, p2shScript))
+			// Rebuild the transaction with modified output and additional output
+			txOut0 := prevTx.TxOut()[0]
+			newTxOuts := []*wire.TxOut{
+				{Value: txOut0.Value - 2, PkScript: txOut0.PkScript},
+				wire.NewTxOut(2, p2shScript),
+			}
+			prevTxIns := prevTx.TxIn()
+			newTxIns := make([]*wire.TxIn, len(prevTxIns))
+			for j := range prevTxIns {
+				newTxIns[j] = &prevTxIns[j]
+			}
+			prevTx = wire.NewMsgTx(prevTx.Version, newTxIns, newTxOuts, prevTx.LockTime)
 			b.AddTransaction(prevTx)
 		}
 	})
@@ -1186,16 +1286,21 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 		txnsNeeded := (maxBlockSigOps / redeemScriptSigOps)
 		for i := 0; i < txnsNeeded; i++ {
 			// Create a signed transaction that spends from the
-			// associated p2sh output in b39.
-			spend := testhelper.MakeSpendableOutForTx(b39.Transactions[i+2], 2)
+			// associated p2sh output in b39 (output index 1 has the p2sh script).
+			spend := testhelper.MakeSpendableOutForTx(b39.Transactions[i+2], 1)
 			tx := testhelper.CreateSpendTx(&spend, testhelper.LowFee)
 			sig, err := txscript.RawTxInSignature(tx, 0,
 				redeemScript, txscript.SigHashAll, g.privKey)
 			if err != nil {
 				panic(err)
 			}
-			tx.TxIn[0].SignatureScript = pushDataScript(sig,
-				redeemScript)
+			txIn0 := tx.TxIn()[0]
+			tx = rebuildTxWithInput(tx, 0, &wire.TxIn{
+				PreviousOutPoint: txIn0.PreviousOutPoint,
+				SignatureScript:  pushDataScript(sig, redeemScript),
+				Sequence:         txIn0.Sequence,
+				Witness:          txIn0.Witness,
+			})
 			b.AddTransaction(tx)
 		}
 
@@ -1205,7 +1310,11 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 		fill := maxBlockSigOps - (txnsNeeded * redeemScriptSigOps) + 1
 		finalTx := b.Transactions[len(b.Transactions)-1]
 		tx := createSpendTxForTx(finalTx, testhelper.LowFee)
-		tx.TxOut[0].PkScript = repeatOpcode(txscript.OP_CHECKSIG, fill)
+		txOut0 := tx.TxOut()[0]
+		tx = rebuildTxWithOutput(tx, 0, &wire.TxOut{
+			Value:    txOut0.Value,
+			PkScript: repeatOpcode(txscript.OP_CHECKSIG, fill),
+		})
 		b.AddTransaction(tx)
 	})
 	rejected(blockchain.ErrTooManySigOps)
@@ -1218,15 +1327,20 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 	g.nextBlock("b41", outs[12], func(b *wire.MsgBlock) {
 		txnsNeeded := (maxBlockSigOps / redeemScriptSigOps)
 		for i := 0; i < txnsNeeded; i++ {
-			spend := testhelper.MakeSpendableOutForTx(b39.Transactions[i+2], 2)
+			spend := testhelper.MakeSpendableOutForTx(b39.Transactions[i+2], 1)
 			tx := testhelper.CreateSpendTx(&spend, testhelper.LowFee)
 			sig, err := txscript.RawTxInSignature(tx, 0,
 				redeemScript, txscript.SigHashAll, g.privKey)
 			if err != nil {
 				panic(err)
 			}
-			tx.TxIn[0].SignatureScript = pushDataScript(sig,
-				redeemScript)
+			txIn0 := tx.TxIn()[0]
+			tx = rebuildTxWithInput(tx, 0, &wire.TxIn{
+				PreviousOutPoint: txIn0.PreviousOutPoint,
+				SignatureScript:  pushDataScript(sig, redeemScript),
+				Sequence:         txIn0.Sequence,
+				Witness:          txIn0.Witness,
+			})
 			b.AddTransaction(tx)
 		}
 
@@ -1239,7 +1353,11 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 		}
 		finalTx := b.Transactions[len(b.Transactions)-1]
 		tx := createSpendTxForTx(finalTx, testhelper.LowFee)
-		tx.TxOut[0].PkScript = repeatOpcode(txscript.OP_CHECKSIG, fill)
+		txOut0 := tx.TxOut()[0]
+		tx = rebuildTxWithOutput(tx, 0, &wire.TxOut{
+			Value:    txOut0.Value,
+			PkScript: repeatOpcode(txscript.OP_CHECKSIG, fill),
+		})
 		b.AddTransaction(tx)
 	})
 	accepted()
@@ -1387,8 +1505,14 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 	g.nextBlock("b52", outs[14], func(b *wire.MsgBlock) {
 		hash := newHashFromStr("00000000000000000000000000000000" +
 			"00000000000000000123456789abcdef")
-		b.Transactions[1].TxIn[0].PreviousOutPoint.Hash = *hash
-		b.Transactions[1].TxIn[0].PreviousOutPoint.Index = 0
+		origTx := b.Transactions[1]
+		txIn0 := origTx.TxIn()[0]
+		b.Transactions[1] = rebuildTxWithInput(origTx, 0, &wire.TxIn{
+			PreviousOutPoint: wire.OutPoint{Hash: *hash, Index: 0},
+			SignatureScript:  txIn0.SignatureScript,
+			Sequence:         txIn0.Sequence,
+			Witness:          txIn0.Witness,
+		})
 	})
 	rejected(blockchain.ErrMissingTxOut)
 
@@ -1540,7 +1664,14 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 	//                 \-> b58(17)
 	g.setTip("b57")
 	g.nextBlock("b58", outs[17], func(b *wire.MsgBlock) {
-		b.Transactions[1].TxIn[0].PreviousOutPoint.Index = 42
+		origTx := b.Transactions[1]
+		txIn0 := origTx.TxIn()[0]
+		b.Transactions[1] = rebuildTxWithInput(origTx, 0, &wire.TxIn{
+			PreviousOutPoint: wire.OutPoint{Hash: txIn0.PreviousOutPoint.Hash, Index: 42},
+			SignatureScript:  txIn0.SignatureScript,
+			Sequence:         txIn0.Sequence,
+			Witness:          txIn0.Witness,
+		})
 	})
 	rejected(blockchain.ErrMissingTxOut)
 
@@ -1550,7 +1681,12 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 	//                 \-> b59(17)
 	g.setTip("b57")
 	g.nextBlock("b59", outs[17], func(b *wire.MsgBlock) {
-		b.Transactions[1].TxOut[0].Value = int64(outs[17].Amount) + 1
+		origTx := b.Transactions[1]
+		txOut0 := origTx.TxOut()[0]
+		b.Transactions[1] = rebuildTxWithOutput(origTx, 0, &wire.TxOut{
+			Value:    int64(outs[17].Amount) + 1,
+			PkScript: txOut0.PkScript,
+		})
 	})
 	rejected(blockchain.ErrSpendTooHigh)
 
@@ -1591,8 +1727,14 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 		// A non-final transaction must have at least one input with a
 		// non-final sequence number in addition to a non-final lock
 		// time.
-		b.Transactions[1].LockTime = 0xffffffff
-		b.Transactions[1].TxIn[0].Sequence = 0
+		origTx := b.Transactions[1]
+		txIn0 := origTx.TxIn()[0]
+		b.Transactions[1] = rebuildTxWithLockTimeAndInput(origTx, 0xffffffff, 0, &wire.TxIn{
+			PreviousOutPoint: txIn0.PreviousOutPoint,
+			SignatureScript:  txIn0.SignatureScript,
+			Sequence:         0,
+			Witness:          txIn0.Witness,
+		})
 	})
 	rejected(blockchain.ErrUnfinalizedTx)
 
@@ -1605,8 +1747,14 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 		// A non-final transaction must have at least one input with a
 		// non-final sequence number in addition to a non-final lock
 		// time.
-		b.Transactions[0].LockTime = 0xffffffff
-		b.Transactions[0].TxIn[0].Sequence = 0
+		origTx := b.Transactions[0]
+		txIn0 := origTx.TxIn()[0]
+		b.Transactions[0] = rebuildTxWithLockTimeAndInput(origTx, 0xffffffff, 0, &wire.TxIn{
+			PreviousOutPoint: txIn0.PreviousOutPoint,
+			SignatureScript:  txIn0.SignatureScript,
+			Sequence:         0,
+			Witness:          txIn0.Witness,
+		})
 	})
 	rejected(blockchain.ErrUnfinalizedTx)
 
@@ -1805,7 +1953,13 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 	g.nextBlock("b74", outs[23], replaceSpendScript(script), func(b *wire.MsgBlock) {
 		tx2 := b.Transactions[1]
 		tx3 := createSpendTxForTx(tx2, testhelper.LowFee)
-		tx3.TxIn[0].SignatureScript = []byte{txscript.OP_FALSE}
+		txIn0 := tx3.TxIn()[0]
+		tx3 = rebuildTxWithInput(tx3, 0, &wire.TxIn{
+			PreviousOutPoint: txIn0.PreviousOutPoint,
+			SignatureScript:  []byte{txscript.OP_FALSE},
+			Sequence:         txIn0.Sequence,
+			Witness:          txIn0.Witness,
+		})
 		b.AddTransaction(tx3)
 	})
 	accepted()
@@ -1824,9 +1978,22 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 		const numAdditionalOutputs = 4
 		const zeroCoin = int64(0)
 		spendTx := b.Transactions[1]
-		for i := 0; i < numAdditionalOutputs; i++ {
-			spendTx.AddTxOut(wire.NewTxOut(zeroCoin, testhelper.OpTrueScript))
+
+		// Build a new transaction with additional outputs.
+		spendTxIns := spendTx.TxIn()
+		newTxIns := make([]*wire.TxIn, len(spendTxIns))
+		for i := range spendTxIns {
+			newTxIns[i] = &spendTxIns[i]
 		}
+		spendTxOuts := spendTx.TxOut()
+		newTxOuts := make([]*wire.TxOut, 0, len(spendTxOuts)+numAdditionalOutputs)
+		for i := range spendTxOuts {
+			newTxOuts = append(newTxOuts, &spendTxOuts[i])
+		}
+		for i := 0; i < numAdditionalOutputs; i++ {
+			newTxOuts = append(newTxOuts, wire.NewTxOut(zeroCoin, testhelper.OpTrueScript))
+		}
+		b.Transactions[1] = wire.NewMsgTx(spendTx.Version, newTxIns, newTxOuts, spendTx.LockTime)
 
 		// Add transactions spending from the outputs added above that
 		// each contain an OP_RETURN output.
@@ -1889,13 +2056,30 @@ func Generate(includeLargeReorg bool) (tests [][]TestInstance, err error) {
 		const numAdditionalOutputs = 4
 		const zeroCoin = int64(0)
 		spendTx := b.Transactions[1]
+
+		// Build additional outputs to add.
+		additionalOuts := make([]*wire.TxOut, numAdditionalOutputs)
 		for i := 0; i < numAdditionalOutputs; i++ {
 			opRetScript, err := testhelper.UniqueOpReturnScript()
 			if err != nil {
 				panic(err)
 			}
-			spendTx.AddTxOut(wire.NewTxOut(zeroCoin, opRetScript))
+			additionalOuts[i] = wire.NewTxOut(zeroCoin, opRetScript)
 		}
+
+		// Rebuild transaction with additional outputs.
+		spendTxIns := spendTx.TxIn()
+		newTxIns := make([]*wire.TxIn, len(spendTxIns))
+		for i := range spendTxIns {
+			newTxIns[i] = &spendTxIns[i]
+		}
+		spendTxOuts := spendTx.TxOut()
+		newTxOuts := make([]*wire.TxOut, 0, len(spendTxOuts)+numAdditionalOutputs)
+		for i := range spendTxOuts {
+			newTxOuts = append(newTxOuts, &spendTxOuts[i])
+		}
+		newTxOuts = append(newTxOuts, additionalOuts...)
+		b.Transactions[1] = wire.NewMsgTx(spendTx.Version, newTxIns, newTxOuts, spendTx.LockTime)
 	})
 	for i := uint32(2); i < 6; i++ {
 		g.assertTipBlockTxOutOpReturn(1, i)

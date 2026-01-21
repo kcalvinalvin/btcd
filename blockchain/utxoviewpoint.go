@@ -234,7 +234,9 @@ func (view *UtxoViewpoint) addTxOut(outpoint wire.OutPoint, txOut *wire.TxOut, i
 // for existing entries since it's possible it has changed during a reorg.
 func (view *UtxoViewpoint) AddTxOut(tx *btcutil.Tx, txOutIdx uint32, blockHeight int32) {
 	// Can't add an output for an out of bounds index.
-	if txOutIdx >= uint32(len(tx.MsgTx().TxOut)) {
+	msgTx := tx.MsgTx()
+	txOuts := msgTx.TxOut()
+	if txOutIdx >= uint32(len(txOuts)) {
 		return
 	}
 
@@ -243,8 +245,7 @@ func (view *UtxoViewpoint) AddTxOut(tx *btcutil.Tx, txOutIdx uint32, blockHeight
 	// being replaced by a different transaction with the same hash.  This
 	// is allowed so long as the previous transaction is fully spent.
 	prevOut := wire.OutPoint{Hash: *tx.Hash(), Index: txOutIdx}
-	txOut := tx.MsgTx().TxOut[txOutIdx]
-	view.addTxOut(prevOut, txOut, IsCoinBase(tx), blockHeight)
+	view.addTxOut(prevOut, &txOuts[txOutIdx], IsCoinBase(tx), blockHeight)
 }
 
 // AddTxOuts adds all outputs in the passed transaction which are not provably
@@ -256,14 +257,14 @@ func (view *UtxoViewpoint) AddTxOuts(tx *btcutil.Tx, blockHeight int32) {
 	// provably unspendable.
 	isCoinBase := IsCoinBase(tx)
 	prevOut := wire.OutPoint{Hash: *tx.Hash()}
-	for txOutIdx, txOut := range tx.MsgTx().TxOut {
+	for txOutIdx, txOut := range tx.MsgTx().TxOut() {
 		// Update existing entries.  All fields are updated because it's
 		// possible (although extremely unlikely) that the existing
 		// entry is being replaced by a different transaction with the
 		// same hash.  This is allowed so long as the previous
 		// transaction is fully spent.
 		prevOut.Index = uint32(txOutIdx)
-		view.addTxOut(prevOut, txOut, isCoinBase, blockHeight)
+		view.addTxOut(prevOut, &txOut, isCoinBase, blockHeight)
 	}
 }
 
@@ -283,7 +284,7 @@ func (view *UtxoViewpoint) connectTransaction(tx *btcutil.Tx, blockHeight int32,
 	// Spend the referenced utxos by marking them spent in the view and,
 	// if a slice was provided for the spent txout details, append an entry
 	// to it.
-	for _, txIn := range tx.MsgTx().TxIn {
+	for _, txIn := range tx.MsgTx().TxIn() {
 		// Ensure the referenced utxo exists in the view.  This should
 		// never happen unless there is a bug is introduced in the code.
 		entry := view.entries[txIn.PreviousOutPoint]
@@ -399,7 +400,7 @@ func (view *UtxoViewpoint) disconnectTransactions(db database.DB, block *btcutil
 		// signal modifications have happened.
 		txHash := tx.Hash()
 		prevOut := wire.OutPoint{Hash: *txHash}
-		for txOutIdx, txOut := range tx.MsgTx().TxOut {
+		for txOutIdx, txOut := range tx.MsgTx().TxOut() {
 			if txscript.IsUnspendable(txOut.PkScript) {
 				continue
 			}
@@ -427,7 +428,8 @@ func (view *UtxoViewpoint) disconnectTransactions(db database.DB, block *btcutil
 		if isCoinBase {
 			continue
 		}
-		for txInIdx := len(tx.MsgTx().TxIn) - 1; txInIdx > -1; txInIdx-- {
+		txIns := tx.MsgTx().TxIn()
+		for txInIdx := len(txIns) - 1; txInIdx > -1; txInIdx-- {
 			// Ensure the spent txout index is decremented to stay
 			// in sync with the transaction input.
 			stxo := &stxos[stxoIdx]
@@ -436,7 +438,7 @@ func (view *UtxoViewpoint) disconnectTransactions(db database.DB, block *btcutil
 			// When there is not already an entry for the referenced
 			// output in the view, it means it was previously spent,
 			// so create a new utxo entry in order to resurrect it.
-			originOut := &tx.MsgTx().TxIn[txInIdx].PreviousOutPoint
+			originOut := &txIns[txInIdx].PreviousOutPoint
 			entry := view.entries[*originOut]
 			if entry == nil {
 				entry = new(UtxoEntry)
@@ -595,7 +597,7 @@ func (view *UtxoViewpoint) findInputsToFetch(block *btcutil.Block) []wire.OutPoi
 	// what is already known (in-flight).
 	needed := make([]wire.OutPoint, 0, len(transactions))
 	for i, tx := range transactions[1:] {
-		for _, txIn := range tx.MsgTx().TxIn {
+		for _, txIn := range tx.MsgTx().TxIn() {
 			// It is acceptable for a transaction input to reference
 			// the output of another transaction in this block only
 			// if the referenced transaction comes before the
@@ -655,18 +657,21 @@ func (b *BlockChain) FetchUtxoView(tx *btcutil.Tx) (*UtxoViewpoint, error) {
 	// Create a set of needed outputs based on those referenced by the
 	// inputs of the passed transaction and the outputs of the transaction
 	// itself.
-	neededLen := len(tx.MsgTx().TxOut)
+	msgTx := tx.MsgTx()
+	txOuts := msgTx.TxOut()
+	txIns := msgTx.TxIn()
+	neededLen := len(txOuts)
 	if !IsCoinBase(tx) {
-		neededLen += len(tx.MsgTx().TxIn)
+		neededLen += len(txIns)
 	}
 	needed := make([]wire.OutPoint, 0, neededLen)
 	prevOut := wire.OutPoint{Hash: *tx.Hash()}
-	for txOutIdx := range tx.MsgTx().TxOut {
+	for txOutIdx := range txOuts {
 		prevOut.Index = uint32(txOutIdx)
 		needed = append(needed, prevOut)
 	}
 	if !IsCoinBase(tx) {
-		for _, txIn := range tx.MsgTx().TxIn {
+		for _, txIn := range txIns {
 			needed = append(needed, txIn.PreviousOutPoint)
 		}
 	}

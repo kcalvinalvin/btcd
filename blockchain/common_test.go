@@ -440,17 +440,18 @@ func newBlock(chain *BlockChain, prev *btcutil.Block,
 	blockHeight := prev.Height() + 1
 	txns := make([]*wire.MsgTx, 0, 1+len(spends))
 
-	// Create and add coinbase tx.
-	cb := testhelper.CreateCoinbaseTx(blockHeight, CalcBlockSubsidy(blockHeight, chain.chainParams))
-	txns = append(txns, cb)
-
-	// Spend all txs to be spent.
+	// Create spend transactions first to calculate total fees.
+	var spendTxns []*wire.MsgTx
 	for _, spend := range spends {
-		cb.TxOut[0].Value += int64(testhelper.LowFee)
-
 		spendTx := testhelper.CreateSpendTx(spend, testhelper.LowFee)
-		txns = append(txns, spendTx)
+		spendTxns = append(spendTxns, spendTx)
 	}
+
+	// Create coinbase tx with block subsidy plus total fees.
+	totalFees := int64(len(spends)) * int64(testhelper.LowFee)
+	cb := testhelper.CreateCoinbaseTx(blockHeight, CalcBlockSubsidy(blockHeight, chain.chainParams)+totalFees)
+	txns = append(txns, cb)
+	txns = append(txns, spendTxns...)
 
 	// Use a timestamp that is one second after the previous block unless
 	// this is the first block in which case the current time is used.

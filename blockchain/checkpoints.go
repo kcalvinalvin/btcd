@@ -171,7 +171,7 @@ func (b *BlockChain) findPreviousCheckpoint() (*blockNode, error) {
 // scripts which are not one of the standard types.
 func isNonstandardTransaction(tx *btcutil.Tx) bool {
 	// Check all of the output public key scripts for non-standard scripts.
-	for _, txOut := range tx.MsgTx().TxOut {
+	for _, txOut := range tx.MsgTx().TxOut() {
 		scriptClass := txscript.GetScriptClass(txOut.PkScript)
 		if scriptClass == txscript.NonStandardTy {
 			return true

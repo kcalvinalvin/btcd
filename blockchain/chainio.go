@@ -387,7 +387,7 @@ func deserializeSpendJournalEntry(serialized []byte, txns []*wire.MsgTx) ([]Spen
 	// Calculate the total number of stxos.
 	var numStxos int
 	for _, tx := range txns {
-		numStxos += len(tx.TxIn)
+		numStxos += tx.InputCount()
 	}
 
 	// When a block has no spent txouts there is nothing to serialize.
@@ -414,8 +414,8 @@ func deserializeSpendJournalEntry(serialized []byte, txns []*wire.MsgTx) ([]Spen
 
 		// Loop backwards through all of the transaction inputs and read
 		// the associated stxo.
-		for txInIdx := len(tx.TxIn) - 1; txInIdx > -1; txInIdx-- {
-			txIn := tx.TxIn[txInIdx]
+		txIns := tx.TxIn()
+		for txInIdx := len(txIns) - 1; txInIdx > -1; txInIdx-- {
 			stxo := &stxos[stxoIdx]
 			stxoIdx--
 
@@ -424,7 +424,7 @@ func deserializeSpendJournalEntry(serialized []byte, txns []*wire.MsgTx) ([]Spen
 			if err != nil {
 				return nil, errDeserialize(fmt.Sprintf("unable "+
 					"to decode stxo for %v: %v",
-					txIn.PreviousOutPoint, err))
+					txIns[txInIdx].PreviousOutPoint, err))
 			}
 		}
 	}

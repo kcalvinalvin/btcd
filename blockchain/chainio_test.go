@@ -228,9 +228,9 @@ func TestSpendJournalSerialization(t *testing.T) {
 				IsCoinBase: true,
 				Height:     9,
 			}},
-			blockTxns: []*wire.MsgTx{{ // Coinbase omitted.
-				Version: 1,
-				TxIn: []*wire.TxIn{{
+			blockTxns: []*wire.MsgTx{wire.NewMsgTx( // Coinbase omitted.
+				1,
+				[]*wire.TxIn{{
 					PreviousOutPoint: wire.OutPoint{
 						Hash:  *newHashFromStr("0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9"),
 						Index: 0,
@@ -238,15 +238,15 @@ func TestSpendJournalSerialization(t *testing.T) {
 					SignatureScript: hexToBytes("47304402204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd410220181522ec8eca07de4860a4acdd12909d831cc56cbbac4622082221a8768d1d0901"),
 					Sequence:        0xffffffff,
 				}},
-				TxOut: []*wire.TxOut{{
+				[]*wire.TxOut{{
 					Value:    1000000000,
 					PkScript: hexToBytes("4104ae1a62fe09c5f51b13905f07f06b99a2f7159b2225f374cd378d71302fa28414e7aab37397f554a7df5f142c21c1b7303b8a0626f1baded5c72a704f7e6cd84cac"),
 				}, {
 					Value:    4000000000,
 					PkScript: hexToBytes("410411db93e1dcdb8a016b49840f8c53bc1eb68a382e97b1482ecad7b148a6909a5cb2e0eaddfb84ccf9744464f82e160bfa9b8b64f9d4c03f999b8643f656b412a3ac"),
 				}},
-				LockTime: 0,
-			}},
+				0,
+			)},
 			serialized: hexToBytes("1300320511db93e1dcdb8a016b49840f8c53bc1eb68a382e97b1482ecad7b148a6909a5c"),
 		},
 		// Adapted from block 100025 in main blockchain.
@@ -263,9 +263,9 @@ func TestSpendJournalSerialization(t *testing.T) {
 				IsCoinBase: false,
 				Height:     100024,
 			}},
-			blockTxns: []*wire.MsgTx{{ // Coinbase omitted.
-				Version: 1,
-				TxIn: []*wire.TxIn{{
+			blockTxns: []*wire.MsgTx{wire.NewMsgTx( // Coinbase omitted.
+				1,
+				[]*wire.TxIn{{
 					PreviousOutPoint: wire.OutPoint{
 						Hash:  *newHashFromStr("c0ed017828e59ad5ed3cf70ee7c6fb0f426433047462477dc7a5d470f987a537"),
 						Index: 1,
@@ -273,17 +273,17 @@ func TestSpendJournalSerialization(t *testing.T) {
 					SignatureScript: hexToBytes("493046022100c167eead9840da4a033c9a56470d7794a9bb1605b377ebe5688499b39f94be59022100fb6345cab4324f9ea0b9ee9169337534834638d818129778370f7d378ee4a325014104d962cac5390f12ddb7539507065d0def320d68c040f2e73337c3a1aaaab7195cb5c4d02e0959624d534f3c10c3cf3d73ca5065ebd62ae986b04c6d090d32627c"),
 					Sequence:        0xffffffff,
 				}},
-				TxOut: []*wire.TxOut{{
+				[]*wire.TxOut{{
 					Value:    5000000,
 					PkScript: hexToBytes("76a914f419b8db4ba65f3b6fcc233acb762ca6f51c23d488ac"),
 				}, {
 					Value:    34400000000,
 					PkScript: hexToBytes("76a914cadf4fc336ab3c6a4610b75f31ba0676b7f663d288ac"),
 				}},
-				LockTime: 0,
-			}, {
-				Version: 1,
-				TxIn: []*wire.TxIn{{
+				0,
+			), wire.NewMsgTx(
+				1,
+				[]*wire.TxIn{{
 					PreviousOutPoint: wire.OutPoint{
 						Hash:  *newHashFromStr("92fbe1d4be82f765dfabc9559d4620864b05cc897c4db0e29adac92d294e52b7"),
 						Index: 0,
@@ -291,15 +291,15 @@ func TestSpendJournalSerialization(t *testing.T) {
 					SignatureScript: hexToBytes("483045022100e256743154c097465cf13e89955e1c9ff2e55c46051b627751dee0144183157e02201d8d4f02cde8496aae66768f94d35ce54465bd4ae8836004992d3216a93a13f00141049d23ce8686fe9b802a7a938e8952174d35dd2c2089d4112001ed8089023ab4f93a3c9fcd5bfeaa9727858bf640dc1b1c05ec3b434bb59837f8640e8810e87742"),
 					Sequence:        0xffffffff,
 				}},
-				TxOut: []*wire.TxOut{{
+				[]*wire.TxOut{{
 					Value:    5000000,
 					PkScript: hexToBytes("76a914a983ad7c92c38fc0e2025212e9f972204c6e687088ac"),
 				}, {
 					Value:    13756000000,
 					PkScript: hexToBytes("76a914a6ebd69952ab486a7a300bfffdcb395dc7d47c2388ac"),
 				}},
-				LockTime: 0,
-			}},
+				0,
+			)},
 			serialized: hexToBytes("8b99700086c64700b2fb57eadf61e106a100a7445a8c3f67898841ec8b99700091f20f006edbc6c4d31bae9f1ccc38538a114bf42de65e86"),
 		},
 	}
@@ -348,9 +348,9 @@ func TestSpendJournalErrors(t *testing.T) {
 		// Adapted from block 170 in main blockchain.
 		{
 			name: "Force assertion due to missing stxos",
-			blockTxns: []*wire.MsgTx{{ // Coinbase omitted.
-				Version: 1,
-				TxIn: []*wire.TxIn{{
+			blockTxns: []*wire.MsgTx{wire.NewMsgTx( // Coinbase omitted.
+				1,
+				[]*wire.TxIn{{
 					PreviousOutPoint: wire.OutPoint{
 						Hash:  *newHashFromStr("0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9"),
 						Index: 0,
@@ -358,16 +358,17 @@ func TestSpendJournalErrors(t *testing.T) {
 					SignatureScript: hexToBytes("47304402204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd410220181522ec8eca07de4860a4acdd12909d831cc56cbbac4622082221a8768d1d0901"),
 					Sequence:        0xffffffff,
 				}},
-				LockTime: 0,
-			}},
+				nil,
+				0,
+			)},
 			serialized: hexToBytes(""),
 			errType:    AssertError(""),
 		},
 		{
 			name: "Force deserialization error in stxos",
-			blockTxns: []*wire.MsgTx{{ // Coinbase omitted.
-				Version: 1,
-				TxIn: []*wire.TxIn{{
+			blockTxns: []*wire.MsgTx{wire.NewMsgTx( // Coinbase omitted.
+				1,
+				[]*wire.TxIn{{
 					PreviousOutPoint: wire.OutPoint{
 						Hash:  *newHashFromStr("0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9"),
 						Index: 0,
@@ -375,8 +376,9 @@ func TestSpendJournalErrors(t *testing.T) {
 					SignatureScript: hexToBytes("47304402204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd410220181522ec8eca07de4860a4acdd12909d831cc56cbbac4622082221a8768d1d0901"),
 					Sequence:        0xffffffff,
 				}},
-				LockTime: 0,
-			}},
+				nil,
+				0,
+			)},
 			serialized: hexToBytes("1301320511db93e1dcdb8a016b49840f8c53bc1eb68a382e97b1482ecad7b148a6909a"),
 			errType:    errDeserialize(""),
 		},

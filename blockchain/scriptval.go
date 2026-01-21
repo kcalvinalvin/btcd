@@ -218,7 +218,7 @@ func ValidateTransactionScripts(tx *btcutil.Tx, utxoView *UtxoViewpoint,
 
 	// Collect all of the transaction inputs and required information for
 	// validation.
-	txIns := tx.MsgTx().TxIn
+	txIns := tx.MsgTx().TxIn()
 	txValItems := make([]*txValidateItem, 0, len(txIns))
 	for txInIdx, txIn := range txIns {
 		// Skip coinbases.
@@ -228,7 +228,7 @@ func ValidateTransactionScripts(tx *btcutil.Tx, utxoView *UtxoViewpoint,
 
 		txVI := &txValidateItem{
 			txInIndex: txInIdx,
-			txIn:      txIn,
+			txIn:      &txIns[txInIdx],
 			tx:        tx,
 			sigHashes: cachedHashes,
 		}
@@ -254,7 +254,7 @@ func checkBlockScripts(block *btcutil.Block, utxoView *UtxoViewpoint,
 	// validation for all transactions in the block into a single slice.
 	numInputs := 0
 	for _, tx := range block.Transactions() {
-		numInputs += len(tx.MsgTx().TxIn)
+		numInputs += len(tx.MsgTx().TxIn())
 	}
 	txValItems := make([]*txValidateItem, 0, numInputs)
 	for _, tx := range block.Transactions() {
@@ -282,7 +282,8 @@ func checkBlockScripts(block *btcutil.Block, utxoView *UtxoViewpoint,
 			}
 		}
 
-		for txInIdx, txIn := range tx.MsgTx().TxIn {
+		txIns := tx.MsgTx().TxIn()
+		for txInIdx, txIn := range txIns {
 			// Skip coinbases.
 			if txIn.PreviousOutPoint.Index == math.MaxUint32 {
 				continue
@@ -290,7 +291,7 @@ func checkBlockScripts(block *btcutil.Block, utxoView *UtxoViewpoint,
 
 			txVI := &txValidateItem{
 				txInIndex: txInIdx,
-				txIn:      txIn,
+				txIn:      &txIns[txInIdx],
 				tx:        tx,
 				sigHashes: cachedHashes,
 			}
