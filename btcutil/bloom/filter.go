@@ -294,7 +294,8 @@ func (bf *Filter) matchTxAndUpdate(tx *btcutil.Tx) bool {
 	// on the network since it avoids the need for another filteradd message
 	// from the client and avoids some potential races that could otherwise
 	// occur.
-	for i, txOut := range tx.MsgTx().TxOut {
+	msgTx := tx.MsgTx()
+	for i, txOut := range msgTx.TxOut() {
 		pushedData, err := txscript.PushedData(txOut.PkScript)
 		if err != nil {
 			continue
@@ -321,7 +322,7 @@ func (bf *Filter) matchTxAndUpdate(tx *btcutil.Tx) bool {
 
 	// Check if the filter matches any outpoints this transaction spends or
 	// any data elements in the signature scripts of any of the inputs.
-	for _, txin := range tx.MsgTx().TxIn {
+	for _, txin := range msgTx.TxIn() {
 		if bf.matchesOutPoint(&txin.PreviousOutPoint) {
 			return true
 		}

@@ -15,43 +15,89 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-// InPlaceSort modifies the passed transaction inputs and outputs to be sorted
-// based on BIP 69.
+// InPlaceSort is deprecated with the new immutable MsgTx API.
+// It now returns a new sorted transaction instead of modifying in place.
+// Use Sort() instead for clearer semantics.
 //
-// WARNING: This function must NOT be called with published transactions since
-// it will mutate the transaction if it's not already sorted.  This can cause
-// issues if you mutate a tx in a block, for example, which would invalidate the
-// block.  It could also cause cached hashes, such as in a btcutil.Tx to become
-// invalidated.
-//
-// The function should only be used if the caller is creating the transaction or
-// is otherwise 100% positive mutating will not cause adverse affects due to
-// other dependencies.
-func InPlaceSort(tx *wire.MsgTx) {
-	sort.Sort(sortableInputSlice(tx.TxIn))
-	sort.Sort(sortableOutputSlice(tx.TxOut))
+// Deprecated: Use Sort() instead.
+func InPlaceSort(tx *wire.MsgTx) *wire.MsgTx {
+	return Sort(tx)
 }
 
 // Sort returns a new transaction with the inputs and outputs sorted based on
 // BIP 69.  The passed transaction is not modified and the new transaction
 // might have a different hash if any sorting was done.
 func Sort(tx *wire.MsgTx) *wire.MsgTx {
-	txCopy := tx.Copy()
-	sort.Sort(sortableInputSlice(txCopy.TxIn))
-	sort.Sort(sortableOutputSlice(txCopy.TxOut))
-	return txCopy
+	// Extract inputs and outputs into slices.
+	txIns := tx.TxIn()
+	inputs := make([]*wire.TxIn, len(txIns))
+	for i := range txIns {
+		inputs[i] = &txIns[i]
+	}
+
+	txOuts := tx.TxOut()
+	outputs := make([]*wire.TxOut, len(txOuts))
+	for i := range txOuts {
+		outputs[i] = &txOuts[i]
+	}
+
+	// Sort the slices.
+	sort.Sort(sortableInputSlice(inputs))
+	sort.Sort(sortableOutputSlice(outputs))
+
+	// Create a new transaction with sorted inputs and outputs.
+	return wire.NewMsgTx(tx.Version, inputs, outputs, tx.LockTime)
 }
 
 // IsSorted checks whether tx has inputs and outputs sorted according to BIP
 // 69.
 func IsSorted(tx *wire.MsgTx) bool {
-	if !sort.IsSorted(sortableInputSlice(tx.TxIn)) {
-		return false
+	// Check inputs are sorted.
+	txIns := tx.TxIn()
+	for i := 1; i < len(txIns); i++ {
+		prev := &txIns[i-1]
+		curr := &txIns[i]
+		if !inputLessOrEqual(prev, curr) {
+			return false
+		}
 	}
-	if !sort.IsSorted(sortableOutputSlice(tx.TxOut)) {
-		return false
+
+	// Check outputs are sorted.
+	txOuts := tx.TxOut()
+	for i := 1; i < len(txOuts); i++ {
+		prev := &txOuts[i-1]
+		curr := &txOuts[i]
+		if !outputLessOrEqual(prev, curr) {
+			return false
+		}
 	}
+
 	return true
+}
+
+// inputLessOrEqual returns true if a should come before or equal to b.
+func inputLessOrEqual(a, b *wire.TxIn) bool {
+	ahash := a.PreviousOutPoint.Hash
+	bhash := b.PreviousOutPoint.Hash
+	if ahash == bhash {
+		return a.PreviousOutPoint.Index <= b.PreviousOutPoint.Index
+	}
+
+	// Reverse hashes to big-endian for comparison.
+	const hashSize = chainhash.HashSize
+	for k := 0; k < hashSize/2; k++ {
+		ahash[k], ahash[hashSize-1-k] = ahash[hashSize-1-k], ahash[k]
+		bhash[k], bhash[hashSize-1-k] = bhash[hashSize-1-k], bhash[k]
+	}
+	return bytes.Compare(ahash[:], bhash[:]) <= 0
+}
+
+// outputLessOrEqual returns true if a should come before or equal to b.
+func outputLessOrEqual(a, b *wire.TxOut) bool {
+	if a.Value == b.Value {
+		return bytes.Compare(a.PkScript, b.PkScript) <= 0
+	}
+	return a.Value < b.Value
 }
 
 type sortableInputSlice []*wire.TxIn

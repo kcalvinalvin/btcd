@@ -125,11 +125,10 @@ func (cs *CoinSet) removeElement(e *list.Element) Coin {
 // NewMsgTxWithInputCoins takes the coins in the CoinSet and makes them
 // the inputs to a new wire.MsgTx which is returned.
 func NewMsgTxWithInputCoins(txVersion int32, inputCoins Coins) *wire.MsgTx {
-	msgTx := wire.NewMsgTx(txVersion)
 	coins := inputCoins.Coins()
-	msgTx.TxIn = make([]*wire.TxIn, len(coins))
+	txIns := make([]*wire.TxIn, len(coins))
 	for i, coin := range coins {
-		msgTx.TxIn[i] = &wire.TxIn{
+		txIns[i] = &wire.TxIn{
 			PreviousOutPoint: wire.OutPoint{
 				Hash:  *coin.Hash(),
 				Index: coin.Index(),
@@ -138,7 +137,7 @@ func NewMsgTxWithInputCoins(txVersion int32, inputCoins Coins) *wire.MsgTx {
 			Sequence:        wire.MaxTxInSequenceNum,
 		}
 	}
-	return msgTx
+	return wire.NewMsgTx(txVersion, txIns, nil, 0)
 }
 
 var (
@@ -365,7 +364,7 @@ func (c *SimpleCoin) Index() uint32 {
 
 // txOut returns the TxOut of the transaction the Coin represents
 func (c *SimpleCoin) txOut() *wire.TxOut {
-	return c.Tx.MsgTx().TxOut[c.TxIndex]
+	return &c.Tx.MsgTx().TxOut()[c.TxIndex]
 }
 
 // Value returns the value of the Coin

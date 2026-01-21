@@ -111,10 +111,11 @@ func TestCoinSet(t *testing.T) {
 	}
 
 	mtx := coinset.NewMsgTxWithInputCoins(wire.TxVersion, cs)
-	if len(mtx.TxIn) != 1 {
-		t.Errorf("Expected only 1 TxIn, got %d", len(mtx.TxIn))
+	if len(mtx.TxIn()) != 1 {
+		t.Errorf("Expected only 1 TxIn, got %d", len(mtx.TxIn()))
 	}
-	op := mtx.TxIn[0].PreviousOutPoint
+	txIn := mtx.TxIn()[0]
+	op := txIn.PreviousOutPoint
 	if !op.Hash.IsEqual(coins[1].Hash()) || op.Index != coins[1].Index() {
 		t.Errorf("Expected the second coin to be added as input to mtx")
 	}

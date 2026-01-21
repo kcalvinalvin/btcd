@@ -313,7 +313,7 @@ func BuildBasicFilter(block *wire.MsgBlock, prevOutScripts [][]byte) (*gcs.Filte
 	for _, tx := range block.Transactions {
 		// For each output in a transaction, we'll add each of the
 		// individual data pushes within the script.
-		for _, txOut := range tx.TxOut {
+		for _, txOut := range tx.TxOut() {
 			if len(txOut.PkScript) == 0 {
 				continue
 			}
