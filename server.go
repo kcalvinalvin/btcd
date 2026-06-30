@@ -2810,13 +2810,12 @@ out:
 	s.wg.Done()
 }
 
-// setupRPCListeners returns a slice of listeners that are configured for use
-// with the RPC server depending on the configuration settings for listen
-// addresses and TLS.
-func setupRPCListeners() ([]net.Listener, error) {
-	// Setup TLS if not disabled.
+// setupListeners returns a slice of listeners configured for the given listen
+// addresses, optionally wrapping them in TLS.
+func setupListeners(listenAddrs []string, tlsOn bool) ([]net.Listener, error) {
+	// Setup TLS if enabled.
 	listenFunc := net.Listen
-	if !cfg.DisableTLS {
+	if tlsOn {
 		// Generate the TLS cert and key file if both don't already
 		// exist.
 		if !fileExists(cfg.RPCKey) && !fileExists(cfg.RPCCert) {
@@ -2841,7 +2840,7 @@ func setupRPCListeners() ([]net.Listener, error) {
 		}
 	}
 
-	netAddrs, err := parseListeners(cfg.RPCListeners)
+	netAddrs, err := parseListeners(listenAddrs)
 	if err != nil {
 		return nil, err
 	}
@@ -3181,7 +3180,7 @@ func newServer(listenAddrs, agentBlacklist, agentWhitelist []string,
 	if !cfg.DisableRPC {
 		// Setup listeners for the configured RPC listen addresses and
 		// TLS settings.
-		rpcListeners, err := setupRPCListeners()
+		rpcListeners, err := setupListeners(cfg.RPCListeners, !cfg.DisableTLS)
 		if err != nil {
 			return nil, err
 		}
