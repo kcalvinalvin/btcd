@@ -31,6 +31,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/database"
+	"github.com/btcsuite/btcd/electrum-server"
 	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/mining"
 	"github.com/btcsuite/btcd/mining/cpuminer"
@@ -254,9 +255,12 @@ type server struct {
 	// if the associated index is not enabled.  These fields are set during
 	// initial creation of the server and never changed afterwards, so they
 	// do not need to be protected for concurrent access.
-	txIndex   *indexers.TxIndex
-	addrIndex *indexers.AddrIndex
-	cfIndex   *indexers.CfIndex
+	txIndex         *indexers.TxIndex
+	addrIndex       *indexers.AddrIndex
+	cfIndex         *indexers.CfIndex
+	scriptHashIndex *indexers.ScriptHashIndex
+
+	electrumServer *electrum.ElectrumServer
 
 	// The fee estimator keeps track of how long transactions are left in
 	// the mempool before they are mined into blocks.
@@ -2633,6 +2637,10 @@ func (s *server) Start() {
 	if cfg.Generate {
 		s.cpuMiner.Start()
 	}
+
+	if cfg.EnableElectrum && s.electrumServer != nil {
+		s.electrumServer.Start()
+	}
 }
 
 // Stop gracefully shuts down the server by stopping and disconnecting all
@@ -2652,6 +2660,11 @@ func (s *server) Stop() error {
 	// Shutdown the RPC server if it's not disabled.
 	if !cfg.DisableRPC {
 		s.rpcServer.Stop()
+	}
+
+	// Shutdown the electrum server if it's enabled.
+	if cfg.EnableElectrum && s.electrumServer != nil {
+		s.electrumServer.Stop()
 	}
 
 	// Save fee estimator state in the database.
@@ -2811,20 +2824,22 @@ out:
 }
 
 // setupListeners returns a slice of listeners configured for the given listen
-// addresses, optionally wrapping them in TLS.
-func setupListeners(listenAddrs []string, tlsOn bool) ([]net.Listener, error) {
+// addresses, optionally wrapping them in TLS using the given certificate pair,
+// generating the pair when neither file exists. It is used by both the RPC
+// server and the electrum server.
+func setupListeners(listenAddrs []string, tlsOn bool, certFile, keyFile string) ([]net.Listener, error) {
 	// Setup TLS if enabled.
 	listenFunc := net.Listen
 	if tlsOn {
 		// Generate the TLS cert and key file if both don't already
 		// exist.
-		if !fileExists(cfg.RPCKey) && !fileExists(cfg.RPCCert) {
-			err := genCertPair(cfg.RPCCert, cfg.RPCKey)
+		if !fileExists(keyFile) && !fileExists(certFile) {
+			err := genCertPair(certFile, keyFile)
 			if err != nil {
 				return nil, err
 			}
 		}
-		keypair, err := tls.LoadX509KeyPair(cfg.RPCCert, cfg.RPCKey)
+		keypair, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
 			return nil, err
 		}
@@ -2935,13 +2950,23 @@ func newServer(listenAddrs, agentBlacklist, agentWhitelist []string,
 	// addrindex is run first, it may not have the transactions from the
 	// current block indexed.
 	var indexes []indexers.Indexer
-	if cfg.TxIndex || cfg.AddrIndex {
-		// Enable transaction index if address index is enabled since it
-		// requires it.
-		if !cfg.TxIndex {
-			indxLog.Infof("Transaction index enabled because it " +
-				"is required by the address index")
-			cfg.TxIndex = true
+	if cfg.TxIndex || cfg.AddrIndex || cfg.ScriptHashIndex {
+		if cfg.ScriptHashIndex {
+			// Enable transaction index if script hash index is enabled since it
+			// requires it.
+			if !cfg.TxIndex {
+				indxLog.Infof("Transaction index enabled because it " +
+					"is required by the script hash index")
+				cfg.TxIndex = true
+			}
+		} else if cfg.AddrIndex {
+			// Enable transaction index if address index is enabled since it
+			// requires it.
+			if !cfg.TxIndex {
+				indxLog.Infof("Transaction index enabled because it " +
+					"is required by the address index")
+				cfg.TxIndex = true
+			}
 		} else {
 			indxLog.Info("Transaction index is enabled")
 		}
@@ -2949,10 +2974,22 @@ func newServer(listenAddrs, agentBlacklist, agentWhitelist []string,
 		s.txIndex = indexers.NewTxIndex(db)
 		indexes = append(indexes, s.txIndex)
 	}
-	if cfg.AddrIndex {
-		indxLog.Info("Address index is enabled")
+	if cfg.AddrIndex || cfg.ScriptHashIndex {
+		if !cfg.AddrIndex {
+			indxLog.Infof("Address index enabled because it " +
+				"is required by the script hash index")
+			cfg.AddrIndex = true
+		} else {
+			indxLog.Info("Addr index is enabled")
+		}
+
 		s.addrIndex = indexers.NewAddrIndex(db, chainParams)
 		indexes = append(indexes, s.addrIndex)
+	}
+	if cfg.ScriptHashIndex {
+		indxLog.Info("Script hash index is enabled")
+		s.scriptHashIndex = indexers.NewScriptHashIndex(db, chainParams)
+		indexes = append(indexes, s.scriptHashIndex)
 	}
 	if !cfg.NoCFilters {
 		indxLog.Info("Committed filter index is enabled")
@@ -3048,6 +3085,7 @@ func newServer(listenAddrs, agentBlacklist, agentWhitelist []string,
 		SigCache:           s.sigCache,
 		HashCache:          s.hashCache,
 		AddrIndex:          s.addrIndex,
+		ScriptHashIndex:    s.scriptHashIndex,
 		FeeEstimator:       s.feeEstimator,
 	}
 	s.txMemPool = mempool.New(&txC)
@@ -3180,7 +3218,8 @@ func newServer(listenAddrs, agentBlacklist, agentWhitelist []string,
 	if !cfg.DisableRPC {
 		// Setup listeners for the configured RPC listen addresses and
 		// TLS settings.
-		rpcListeners, err := setupListeners(cfg.RPCListeners, !cfg.DisableTLS)
+		rpcListeners, err := setupListeners(
+			cfg.RPCListeners, !cfg.DisableTLS, cfg.RPCCert, cfg.RPCKey)
 		if err != nil {
 			return nil, err
 		}
@@ -3214,6 +3253,54 @@ func newServer(listenAddrs, agentBlacklist, agentWhitelist []string,
 			<-s.rpcServer.RequestedProcessShutdown()
 			shutdownRequestChannel <- struct{}{}
 		}()
+	}
+
+	if cfg.EnableElectrum {
+		listener, err := setupListeners(cfg.ElectrumListeners, false, "", "")
+		if err != nil {
+			return nil, err
+		}
+
+		// listenerTLS runs parallel to listener: one bool per listener
+		// marking whether it is a TLS listener. The plain listeners come
+		// first (all false), followed by the TLS listeners (all true).
+		//
+		// The TLS listeners use a certificate pair of their own rather
+		// than the RPC one. A fresh pair spares existing deployments
+		// from serving a P-521 rpc.cert that mobile TLS stacks reject,
+		// and it can be replaced without breaking clients that pin the
+		// RPC certificate. They also always start, since the notls
+		// option only disables TLS for the RPC server.
+		listenerTLS := make([]bool, len(listener))
+		tlsListener, err := setupListeners(
+			cfg.TLSElectrumListeners, true, cfg.ElectrumCert,
+			cfg.ElectrumKey)
+		if err != nil {
+			return nil, err
+		}
+		for range tlsListener {
+			listenerTLS = append(listenerTLS, true)
+		}
+		listener = append(listener, tlsListener...)
+
+		s.electrumServer, err = electrum.New(&electrum.Config{
+			Listeners:               listener,
+			ListenerTLS:             listenerTLS,
+			MaxClients:              10,
+			Params:                  chainParams,
+			BlockChain:              s.chain,
+			FeeEstimator:            s.feeEstimator,
+			Mempool:                 s.txMemPool,
+			MinRelayFee:             cfg.minRelayTxFee,
+			AddRebroadcastInventory: s.AddRebroadcastInventory,
+			AnnounceNewTransactions: s.AnnounceNewTransactions,
+			TxIndex:                 s.txIndex,
+			AddrIndex:               s.addrIndex,
+			ScriptHashIndex:         s.scriptHashIndex,
+		}, db)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &s, nil

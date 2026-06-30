@@ -145,6 +145,14 @@ func btcdMain(serverChan chan<- *server) error {
 	//
 	// NOTE: The order is important here because dropping the tx index also
 	// drops the address index since it relies on it.
+	if cfg.DropScriptHashIndex {
+		if err := indexers.DropScriptHashIndex(db, interrupt); err != nil {
+			btcdLog.Errorf("%v", err)
+			return err
+		}
+
+		return nil
+	}
 	if cfg.DropAddrIndex {
 		if err := indexers.DropAddrIndex(db, interrupt); err != nil {
 			btcdLog.Errorf("%v", err)
