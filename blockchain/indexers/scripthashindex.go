@@ -1,6 +1,8 @@
 package indexers
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -109,6 +111,9 @@ func dbFetchScriptHashEntry(dbTx database.Tx, scriptHash [32]byte) ([addrKeySize
 type ScriptHashIndex struct {
 	db          database.DB
 	chainParams *chaincfg.Params
+
+	// dataDir is the directory the fast build stages its work in.
+	dataDir string
 
 	// Map for checking if the script hash -> address key mapping already
 	// exists.  This happens as there are a lot of address reuse in bitcoin.
@@ -292,14 +297,14 @@ func (idx *ScriptHashIndex) indexUnconfirmedScriptHash(txHash *chainhash.Hash, p
 
 	scriptHash := chainhash.HashH(pkScript)
 
+	// No need to keep this in memory if it is already mapped by the database.
+	// This happens because of address re-use.
 	var alreadyMapped bool
 	idx.db.View(func(dbTx database.Tx) error {
 		_, alreadyMapped = dbFetchScriptHashEntry(dbTx, scriptHash)
 		return nil
 	})
 	if alreadyMapped {
-		// No need to keep this in memory if we've already mapped it.
-		// This happens because of address re-use.
 		return
 	}
 
@@ -367,16 +372,43 @@ func (idx *ScriptHashIndex) RemoveUnconfirmedTxEntry(hash *chainhash.Hash) {
 	}
 }
 
-func NewScriptHashIndex(db database.DB, chainParams *chaincfg.Params) *ScriptHashIndex {
+// FastBuild bulk-builds the script hash table from the chain, swaps it in for
+// the read path, and persists the index tip.  It implements the FastBuilder
+// interface so the index manager can build the index in a single parallel pass
+// instead of block by block.
+func (idx *ScriptHashIndex) FastBuild(chain *blockchain.BlockChain,
+	interrupt <-chan struct{}) error {
+
+	builtHash, builtHeight, err := buildScriptHashBucketFromChain(
+		chain, idx.db, idx.chainParams, idx.dataDir, 0, interrupt)
+	if err != nil {
+		return err
+	}
+
+	return idx.db.Update(func(dbTx database.Tx) error {
+		return dbPutIndexerTip(dbTx, scriptHashIndexKey, &builtHash, builtHeight)
+	})
+}
+
+func NewScriptHashIndex(db database.DB, chainParams *chaincfg.Params,
+	dataDir string) *ScriptHashIndex {
+
 	return &ScriptHashIndex{
 		db:                   db,
 		chainParams:          chainParams,
+		dataDir:              dataDir,
 		exists:               make(map[chainhash.Hash]struct{}),
 		addrByScriptHash:     make(map[string][addrKeySize]byte),
 		scriptHashesByTxHash: make(map[chainhash.Hash]map[string]struct{}),
 	}
 }
 
-func DropScriptHashIndex(db database.DB, interrupt <-chan struct{}) error {
-	return dropIndex(db, scriptHashIndexKey, scriptHashIndexName, interrupt)
+func DropScriptHashIndex(db database.DB, dataDir string, interrupt <-chan struct{}) error {
+	if err := dropIndex(db, scriptHashIndexKey, scriptHashIndexName, interrupt); err != nil {
+		return err
+	}
+
+	// Remove the standalone table and any build staging kept on disk, which
+	// live outside the database.
+	return os.RemoveAll(filepath.Join(dataDir, scriptHashIndexDirName))
 }

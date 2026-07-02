@@ -2988,7 +2988,7 @@ func newServer(listenAddrs, agentBlacklist, agentWhitelist []string,
 	}
 	if cfg.ScriptHashIndex {
 		indxLog.Info("Script hash index is enabled")
-		s.scriptHashIndex = indexers.NewScriptHashIndex(db, chainParams)
+		s.scriptHashIndex = indexers.NewScriptHashIndex(db, chainParams, cfg.DataDir)
 		indexes = append(indexes, s.scriptHashIndex)
 	}
 	if !cfg.NoCFilters {

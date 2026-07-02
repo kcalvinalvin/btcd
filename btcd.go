@@ -146,7 +146,7 @@ func btcdMain(serverChan chan<- *server) error {
 	// NOTE: The order is important here because dropping the tx index also
 	// drops the address index since it relies on it.
 	if cfg.DropScriptHashIndex {
-		if err := indexers.DropScriptHashIndex(db, interrupt); err != nil {
+		if err := indexers.DropScriptHashIndex(db, cfg.DataDir, interrupt); err != nil {
 			btcdLog.Errorf("%v", err)
 			return err
 		}
@@ -207,6 +207,14 @@ func btcdMain(serverChan chan<- *server) error {
 		err = fmt.Errorf("--addrindex cannot be enabled as the node has been "+
 			"previously pruned. You must delete the files in the datadir: \"%s\" "+
 			"and sync from the beginning to enable the desired index", cfg.DataDir)
+		btcdLog.Errorf("%v", err)
+		return err
+	}
+	if beenPruned && cfg.ScriptHashIndex {
+		err = fmt.Errorf("--scripthashindex cannot be enabled as the node has "+
+			"been previously pruned. You must delete the files in the datadir: "+
+			"\"%s\" and sync from the beginning to enable the desired index",
+			cfg.DataDir)
 		btcdLog.Errorf("%v", err)
 		return err
 	}
