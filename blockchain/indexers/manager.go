@@ -389,6 +389,46 @@ func (m *Manager) Init(chain *blockchain.BlockChain, interrupt <-chan struct{}) 
 		return err
 	}
 
+	// Bulk-build any index that supports a fast build and is behind the best
+	// chain tip.  The builder extends whatever data the index already has, and
+	// may also decide a bulk build is not worthwhile for the remaining gap and
+	// return without building anything, leaving the catchup to the per-block
+	// loop below.
+	for i, indexer := range m.enabledIndexes {
+		builder, ok := indexer.(FastBuilder)
+		if !ok || indexerHeights[i] >= bestHeight {
+			continue
+		}
+		if err := builder.FastBuild(chain, interrupt); err != nil {
+			return err
+		}
+
+		// Reflect the tip the fast build persisted rather than assuming it
+		// reached bestHeight.  The per-block loop below then connects any
+		// blocks that arrived after the build read its target height.
+		var height int32
+		err = m.db.View(func(dbTx database.Tx) error {
+			_, height, err = dbFetchIndexerTip(dbTx, indexer.Key())
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		indexerHeights[i] = height
+	}
+
+	// Recompute the lowest height from the now-updated indexerHeights.  A fast
+	// build advances its index's on-disk tip without touching lowestHeight
+	// above, so leaving it stale would send the per-block catchup loop below
+	// through every height the fast build already covered instead of jumping
+	// straight to the remaining gap.
+	lowestHeight = bestHeight
+	for _, height := range indexerHeights {
+		if height < lowestHeight {
+			lowestHeight = height
+		}
+	}
+
 	// Nothing to index if all of the indexes are caught up.
 	if lowestHeight == bestHeight {
 		return nil
