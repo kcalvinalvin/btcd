@@ -792,37 +792,71 @@ func (idx *AddrIndex) writeAddrIndexToDB(db database.DB, spiller *addrSpiller,
 	}
 	batch := make([]levelEntry, 0, 4096)
 	deletes := make([][levelKeySize]byte, 0)
-	var batchBytes int
+	kvBatch := make([]database.BucketKeyValue, 0, cap(batch))
+	bucketPath := [][]byte{addrIndexKey}
+	var (
+		batchBytes     int
+		currentShard   int
+		lastWriteLog   = time.Now()
+		writtenEntries uint64
+	)
 	flush := func() error {
 		if len(batch) == 0 && len(deletes) == 0 {
 			return nil
 		}
-		err := db.Update(func(dbTx database.Tx) error {
-			bucket := dbTx.Metadata().Bucket(addrIndexKey)
+
+		// The bulk put path only handles puts, so a batch that also removes
+		// level keys goes through a regular transaction to commit both
+		// together.
+		var err error
+		putter, isPutter := db.(database.BucketKeyPutter)
+		if isPutter && len(deletes) == 0 {
+			kvBatch = kvBatch[:0]
 			for j := range batch {
-				err := bucket.Put(batch[j].key[:], batch[j].value)
-				if err != nil {
-					return err
-				}
+				kvBatch = append(kvBatch, database.BucketKeyValue{
+					Key:   batch[j].key[:],
+					Value: batch[j].value,
+				})
 			}
-			// Merging into existing levels can leave an address with fewer
-			// levels than it had, so remove the level keys that no longer
-			// exist.
-			for j := range deletes {
-				if err := bucket.Delete(deletes[j][:]); err != nil {
-					return err
+			err = putter.PutBucketKeys(bucketPath, kvBatch)
+		} else {
+			err = db.Update(func(dbTx database.Tx) error {
+				bucket := dbTx.Metadata().Bucket(addrIndexKey)
+				for j := range batch {
+					err := bucket.Put(batch[j].key[:], batch[j].value)
+					if err != nil {
+						return err
+					}
 				}
-			}
-			return nil
-		})
+				for j := range deletes {
+					if err := bucket.Delete(deletes[j][:]); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		}
+		if err != nil {
+			return err
+		}
+
+		writtenEntries += uint64(len(batch))
+		if time.Since(lastWriteLog) >= addrBuildProgressInterval {
+			log.Infof("Address index write: processing shard %d/%d "+
+				"(%d level entries written)", currentShard+1,
+				numAddrSpillShards, writtenEntries)
+			lastWriteLog = time.Now()
+		}
+
 		batch = batch[:0]
 		deletes = deletes[:0]
 		batchBytes = 0
-		return err
+		return nil
 	}
 
 	memBucket := &memAddrBucket{levels: make(map[[levelKeySize]byte][]byte)}
 	for i := range spiller.shards {
+		currentShard = i
 		if interruptRequested(interrupt) {
 			return errInterruptRequested
 		}

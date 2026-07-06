@@ -8,6 +8,7 @@
 package ffldb
 
 import (
+	"bytes"
 	"compress/bzip2"
 	"encoding/binary"
 	"fmt"
@@ -157,6 +158,113 @@ func TestConvertErr(t *testing.T) {
 				"want %v", i, gotErr.ErrorCode, test.wantErrCode)
 			continue
 		}
+	}
+}
+
+// TestPutBucketKeys ensures the optional bulk bucket key writes land in the
+// requested bucket, are visible through the normal bucket API, and leave
+// unrelated buckets intact.
+func TestPutBucketKeys(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ffldb-putbucketkeys")
+	idb, err := database.Create(dbType, dbPath, blockDataNet)
+	if err != nil {
+		t.Fatalf("Failed to create test database (%s) %v", dbType, err)
+	}
+	defer idb.Close()
+
+	parentName := []byte("parent")
+	childName := []byte("child")
+	siblingName := []byte("sibling")
+
+	err = idb.Update(func(tx database.Tx) error {
+		parent, err := tx.Metadata().CreateBucket(parentName)
+		if err != nil {
+			return err
+		}
+		if _, err := parent.CreateBucket(childName); err != nil {
+			return err
+		}
+		sibling, err := parent.CreateBucket(siblingName)
+		if err != nil {
+			return err
+		}
+		if err := parent.Put([]byte("parent-key"), []byte("parent")); err != nil {
+			return err
+		}
+		return sibling.Put([]byte("sibling-key"), []byte("sibling"))
+	})
+	if err != nil {
+		t.Fatalf("setup buckets: %v", err)
+	}
+
+	countKeys := func(bucketPath ...[]byte) int {
+		var count int
+		err := idb.View(func(tx database.Tx) error {
+			bucket := tx.Metadata()
+			for _, bucketName := range bucketPath {
+				bucket = bucket.Bucket(bucketName)
+				if bucket == nil {
+					t.Fatalf("bucket %q not found", bucketName)
+				}
+			}
+			return bucket.ForEach(func(_, _ []byte) error {
+				count++
+				return nil
+			})
+		})
+		if err != nil {
+			t.Fatalf("count keys: %v", err)
+		}
+		return count
+	}
+
+	ffldb := idb.(*db)
+	bucketPath := [][]byte{parentName, childName}
+	err = ffldb.PutBucketKeys(bucketPath, []database.BucketKeyValue{
+		{Key: []byte("bulk-01"), Value: []byte("one")},
+		{Key: []byte("bulk-02"), Value: []byte("two")},
+	})
+	if err != nil {
+		t.Fatalf("PutBucketKeys: %v", err)
+	}
+	if count := countKeys(parentName, childName); count != 2 {
+		t.Fatalf("child has %d keys after bulk put, want 2", count)
+	}
+	if count := countKeys(parentName); count != 1 {
+		t.Fatalf("parent has %d direct keys, want 1", count)
+	}
+	if count := countKeys(parentName, siblingName); count != 1 {
+		t.Fatalf("sibling has %d keys, want 1", count)
+	}
+
+	err = idb.View(func(tx database.Tx) error {
+		child := tx.Metadata().Bucket(parentName).Bucket(childName)
+		if got := child.Get([]byte("bulk-01")); !bytes.Equal(got, []byte("one")) {
+			t.Fatalf("bulk-01 value is %q, want %q", got, "one")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read bulk put: %v", err)
+	}
+
+	err = ffldb.PutBucketKeys(bucketPath, []database.BucketKeyValue{
+		{Key: nil, Value: []byte("invalid")},
+	})
+	if !checkDbError(t, "PutBucketKeys empty key", err,
+		database.ErrKeyRequired) {
+
+		return
+	}
+
+	err = ffldb.PutBucketKeys([][]byte{parentName, []byte("missing")},
+		[]database.BucketKeyValue{{Key: []byte("key"), Value: []byte("value")}})
+	if !checkDbError(t, "PutBucketKeys missing bucket", err,
+		database.ErrBucketNotFound) {
+
+		return
 	}
 }
 
