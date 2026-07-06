@@ -8,6 +8,7 @@ import (
 	"bytes"
 
 	"github.com/btcsuite/btcd/btcec/v2/internal/fastverify/internal/engine"
+	"github.com/btcsuite/btcd/btcec/v2/internal/fastverify/internal/modinv"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
@@ -82,7 +83,7 @@ func prepareECDSAEquation(r, s *secp.ModNScalar, sigHash []byte,
 	var e secp.ModNScalar
 	e.SetByteSlice(sigHash)
 	w := *s
-	w.InverseNonConst()
+	modinv.ScalarInverse(&w)
 	u1 := e
 	u1.Mul(&w)
 	equation.U1 = engine.Scalar(u1.Bytes())
