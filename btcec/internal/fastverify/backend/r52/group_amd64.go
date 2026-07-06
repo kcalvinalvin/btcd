@@ -23,11 +23,19 @@ func jacDoubleAsm(p, a *jacobianPoint)
 func jacAddMixedAsm(p, a *jacobianPoint, b *affinePoint) uint64
 
 func jacDouble(p, a *jacobianPoint) {
+	if hasIFMA && jacDoubleIFMA(p, a) == 0 {
+		p.Inf = false
+		return
+	}
 	jacDoubleAsm(p, a)
 	p.Inf = false
 }
 
 func jacAddMixed(p, a *jacobianPoint, b *affinePoint) {
+	if hasIFMA && jacAddMixedIFMA(p, a, b) == 0 {
+		p.Inf = false
+		return
+	}
 	if jacAddMixedAsm(p, a, b) != 0 {
 		addMixedGeneric(p, a, b)
 		return
