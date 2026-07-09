@@ -68,7 +68,7 @@ func btcdMain(serverChan chan<- *server) error {
 	// Make sure the certificate pair for the electrum server exists so it
 	// is ready whenever the electrum server is enabled.
 	if !fileExists(cfg.ElectrumKey) && !fileExists(cfg.ElectrumCert) {
-		if err := genCertPair(cfg.ElectrumCert, cfg.ElectrumKey); err != nil {
+		if err := genElectrumCertPair(cfg.ElectrumCert, cfg.ElectrumKey); err != nil {
 			btcdLog.Errorf("Unable to generate the certificate pair "+
 				"for the electrum server: %v", err)
 			return err
