@@ -589,48 +589,17 @@ func NewManager(db database.DB, enabledIndexes []Indexer) *Manager {
 	}
 }
 
-// dropIndex drops the passed index from the database.  Since indexes can be
-// massive, it deletes the index in multiple database transactions in order to
-// keep memory usage to reasonable levels.  It also marks the drop in progress
-// so the drop can be resumed if it is stopped before it is done before the
-// index can be used again.
-func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan struct{}) error {
-	// Nothing to do if the index doesn't already exist.
-	var needsDelete bool
-	err := db.View(func(dbTx database.Tx) error {
-		indexesBucket := dbTx.Metadata().Bucket(indexTipsBucketName)
-		if indexesBucket != nil && indexesBucket.Get(idxKey) != nil {
-			needsDelete = true
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if !needsDelete {
-		log.Infof("Not dropping %s because it does not exist", idxName)
-		return nil
-	}
-
-	// Mark that the index is in the process of being dropped so that it
-	// can be resumed on the next start if interrupted before the process is
-	// complete.
+// deleteIndexEntries deletes all of the entries in the index identified by
+// idxKey along with its buckets.  Since the indexes can be so large,
+// attempting to simply delete the buckets in a single database transaction
+// would result in massive memory usage and likely crash many systems due to
+// ulimits.  In order to avoid this, it uses a cursor to delete a maximum
+// number of entries out of each bucket at a time.  Buckets are recursed
+// depth-first to delete any sub-buckets.
+func deleteIndexEntries(db database.DB, idxKey []byte, idxName string, interrupt <-chan struct{}) error {
 	log.Infof("Dropping all %s entries.  This might take a while...",
 		idxName)
-	err = db.Update(func(dbTx database.Tx) error {
-		indexesBucket := dbTx.Metadata().Bucket(indexTipsBucketName)
-		return indexesBucket.Put(indexDropKey(idxKey), idxKey)
-	})
-	if err != nil {
-		return err
-	}
 
-	// Since the indexes can be so large, attempting to simply delete
-	// the bucket in a single database transaction would result in massive
-	// memory usage and likely crash many systems due to ulimits.  In order
-	// to avoid this, use a cursor to delete a maximum number of entries out
-	// of the bucket at a time. Recurse buckets depth-first to delete any
-	// sub-buckets.
 	const maxDeletions = 2000000
 	var totalDeleted uint64
 
@@ -660,7 +629,7 @@ func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan s
 	}
 
 	// Call subBucketClosure with top-level bucket.
-	err = db.View(func(dbTx database.Tx) error {
+	err := db.View(func(dbTx database.Tx) error {
 		return subBucketClosure(dbTx, idxKey, nil)
 	})
 	if err != nil {
@@ -716,6 +685,68 @@ func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan s
 		if err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+// dropBucket drops the bucket named by bucketPath via the provided dropper.
+// A missing bucket is treated as already dropped so that resuming a
+// previously interrupted drop succeeds.
+func dropBucket(dropper database.BucketDropper, bucketPath [][]byte) error {
+	err := dropper.DropBucket(bucketPath)
+	if dbErr, ok := err.(database.Error); ok &&
+		dbErr.ErrorCode == database.ErrBucketNotFound {
+
+		return nil
+	}
+	return err
+}
+
+// dropIndex drops the passed index from the database.  Since indexes can be
+// massive, it deletes the index in multiple database transactions in order to
+// keep memory usage to reasonable levels.  It also marks the drop in progress
+// so the drop can be resumed if it is stopped before it is done before the
+// index can be used again.
+func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan struct{}) error {
+	// Nothing to do if the index doesn't already exist.
+	var needsDelete bool
+	err := db.View(func(dbTx database.Tx) error {
+		indexesBucket := dbTx.Metadata().Bucket(indexTipsBucketName)
+		if indexesBucket != nil && indexesBucket.Get(idxKey) != nil {
+			needsDelete = true
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !needsDelete {
+		log.Infof("Not dropping %s because it does not exist", idxName)
+		return nil
+	}
+
+	// Mark that the index is in the process of being dropped so that it
+	// can be resumed on the next start if interrupted before the process is
+	// complete.
+	err = db.Update(func(dbTx database.Tx) error {
+		indexesBucket := dbTx.Metadata().Bucket(indexTipsBucketName)
+		return indexesBucket.Put(indexDropKey(idxKey), idxKey)
+	})
+	if err != nil {
+		return err
+	}
+
+	// Remove the index in one shot when the backend can drop its bucket
+	// outright and reclaim the disk space in the background.  Otherwise,
+	// fall back to deleting the index entries in batches.
+	if dropper, ok := db.(database.BucketDropper); ok {
+		log.Infof("Dropping all %s entries", idxName)
+		if err := dropBucket(dropper, [][]byte{idxKey}); err != nil {
+			return err
+		}
+	} else if err := deleteIndexEntries(db, idxKey, idxName, interrupt); err != nil {
+		return err
 	}
 
 	// Call extra index specific deinitialization for the transaction index.

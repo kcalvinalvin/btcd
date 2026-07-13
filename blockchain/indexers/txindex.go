@@ -459,6 +459,16 @@ func NewTxIndex(db database.DB) *TxIndex {
 
 // dropBlockIDIndex drops the internal block id index.
 func dropBlockIDIndex(db database.DB) error {
+	// Drop the buckets outright when the backend can reclaim the disk
+	// space in the background.
+	if dropper, ok := db.(database.BucketDropper); ok {
+		err := dropBucket(dropper, [][]byte{idByHashIndexBucketName})
+		if err != nil {
+			return err
+		}
+		return dropBucket(dropper, [][]byte{hashByIDIndexBucketName})
+	}
+
 	return db.Update(func(dbTx database.Tx) error {
 		meta := dbTx.Metadata()
 		err := meta.DeleteBucket(idByHashIndexBucketName)
