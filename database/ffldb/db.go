@@ -1865,6 +1865,12 @@ type db struct {
 	closed    bool         // Is the database closed?
 	store     *blockStore  // Handles read/writing blocks to flat files.
 	cache     *dbCache     // Cache layer which wraps underlying leveldb DB.
+
+	// These fields manage the background goroutine that reclaims the disk
+	// space used by the keys of dropped buckets.
+	reclaimWake chan struct{}  // Signals that new reclaim records exist.
+	reclaimQuit chan struct{}  // Signals the goroutine to exit.
+	reclaimWg   sync.WaitGroup // Tracks the goroutine for shutdown.
 }
 
 // Enforce db implements the database.DB interface.
@@ -1872,6 +1878,9 @@ var _ database.DB = (*db)(nil)
 
 // Enforce db implements the optional database.BucketKeyPutter interface.
 var _ database.BucketKeyPutter = (*db)(nil)
+
+// Enforce db implements the optional database.BucketDropper interface.
+var _ database.BucketDropper = (*db)(nil)
 
 // Type returns the database driver type the current database instance was
 // created with.
@@ -2118,6 +2127,12 @@ func (db *db) Close() error {
 	// prevents any new ones from being started, it is safe to flush the
 	// cache and clear all state without the individual locks.
 
+	// Stop the background reclaim and wait for it to exit before closing
+	// the underlying leveldb database.  Any reclaim work it has not
+	// finished resumes the next time the database is opened.
+	close(db.reclaimQuit)
+	db.reclaimWg.Wait()
+
 	// Close the database cache which will flush any existing entries to
 	// disk and close the underlying leveldb database.  Any error is saved
 	// and returned at the end after the remaining cleanup since the
@@ -2221,9 +2236,24 @@ func openDB(dbPath string, network wire.BitcoinNet, create bool) (database.DB, e
 		return nil, convertErr(err.Error(), err)
 	}
 	cache := newDbCache(ldb, store, defaultCacheSize, defaultFlushSecs)
-	pdb := &db{store: store, cache: cache}
+	pdb := &db{
+		store:       store,
+		cache:       cache,
+		reclaimWake: make(chan struct{}, 1),
+		reclaimQuit: make(chan struct{}),
+	}
 
 	// Perform any reconciliation needed between the block and metadata as
 	// well as database initialization, if needed.
-	return reconcileDB(pdb, create)
+	rdb, err := reconcileDB(pdb, create)
+	if err != nil {
+		return nil, err
+	}
+
+	// Start the background reclaim, which also resumes deleting the keys
+	// of any buckets that were dropped before the database was last
+	// closed.
+	pdb.reclaimWg.Add(1)
+	go pdb.reclaimLoop()
+	return rdb, nil
 }

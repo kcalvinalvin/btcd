@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -24,6 +25,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/syndtr/goleveldb/leveldb"
 	ldberrors "github.com/syndtr/goleveldb/leveldb/errors"
+	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
 var (
@@ -265,6 +267,285 @@ func TestPutBucketKeys(t *testing.T) {
 		database.ErrBucketNotFound) {
 
 		return
+	}
+}
+
+// waitForReclaim waits for the background reclaim to delete every key with
+// the provided prefixes from the underlying leveldb database.
+func waitForReclaim(t *testing.T, fdb *db, prefixes [][]byte) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		remaining := 0
+		for _, prefix := range prefixes {
+			iter := fdb.cache.ldb.NewIterator(util.BytesPrefix(prefix), nil)
+			if iter.Next() {
+				remaining++
+			}
+			iter.Release()
+		}
+		if remaining == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d key prefixes still have keys after "+
+				"waiting for the reclaim", remaining)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDropBucket ensures dropping a bucket removes it and its nested buckets
+// from the bucket API immediately, that the background reclaim deletes the
+// keys they contained from the underlying database, and that unrelated
+// buckets along with recreated buckets of the same name are left intact.
+func TestDropBucket(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ffldb-dropbucket")
+	idb, err := database.Create(dbType, dbPath, blockDataNet)
+	if err != nil {
+		t.Fatalf("Failed to create test database (%s) %v", dbType, err)
+	}
+	defer idb.Close()
+
+	parentName := []byte("parent")
+	childName := []byte("child")
+	grandchildName := []byte("grandchild")
+	siblingName := []byte("sibling")
+
+	var childID, grandchildID []byte
+	err = idb.Update(func(tx database.Tx) error {
+		parent, err := tx.Metadata().CreateBucket(parentName)
+		if err != nil {
+			return err
+		}
+		child, err := parent.CreateBucket(childName)
+		if err != nil {
+			return err
+		}
+		grandchild, err := child.CreateBucket(grandchildName)
+		if err != nil {
+			return err
+		}
+		sibling, err := parent.CreateBucket(siblingName)
+		if err != nil {
+			return err
+		}
+		childID = copySlice(child.(*bucket).id[:])
+		grandchildID = copySlice(grandchild.(*bucket).id[:])
+
+		if err := parent.Put([]byte("parent-key"), []byte("parent")); err != nil {
+			return err
+		}
+		if err := sibling.Put([]byte("sibling-key"), []byte("sibling")); err != nil {
+			return err
+		}
+		for i := 0; i < 5; i++ {
+			key := []byte(fmt.Sprintf("key-%02d", i))
+			if err := child.Put(key, []byte{byte(i)}); err != nil {
+				return err
+			}
+			if err := grandchild.Put(key, []byte{byte(i)}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setup buckets: %v", err)
+	}
+
+	fdb := idb.(*db)
+	if err := fdb.DropBucket([][]byte{parentName, childName}); err != nil {
+		t.Fatalf("DropBucket: %v", err)
+	}
+
+	// The dropped bucket must be gone from the bucket API immediately
+	// while the rest of the hierarchy is untouched.  Recreating a bucket
+	// with the same name must also be safe while the reclaim of the old
+	// bucket's keys may still be running.
+	err = idb.Update(func(tx database.Tx) error {
+		parent := tx.Metadata().Bucket(parentName)
+		if parent.Bucket(childName) != nil {
+			t.Fatal("child bucket still exists after drop")
+		}
+		if got := parent.Get([]byte("parent-key")); !bytes.Equal(got, []byte("parent")) {
+			t.Fatalf("parent-key value is %q, want %q", got, "parent")
+		}
+		sibling := parent.Bucket(siblingName)
+		if sibling == nil {
+			t.Fatal("sibling bucket is gone after drop")
+		}
+		if got := sibling.Get([]byte("sibling-key")); !bytes.Equal(got, []byte("sibling")) {
+			t.Fatalf("sibling-key value is %q, want %q", got, "sibling")
+		}
+
+		child, err := parent.CreateBucket(childName)
+		if err != nil {
+			return err
+		}
+		return child.Put([]byte("new-key"), []byte("new"))
+	})
+	if err != nil {
+		t.Fatalf("verify buckets after drop: %v", err)
+	}
+
+	// The background reclaim must delete every key under the dropped
+	// bucket IDs along with the reclaim records that track them.
+	waitForReclaim(t, fdb, [][]byte{childID, grandchildID, reclaimKeyPrefix})
+
+	// The recreated bucket uses a new bucket ID, so its keys must survive
+	// the reclaim of the old ones.
+	err = idb.View(func(tx database.Tx) error {
+		child := tx.Metadata().Bucket(parentName).Bucket(childName)
+		if got := child.Get([]byte("new-key")); !bytes.Equal(got, []byte("new")) {
+			t.Fatalf("new-key value is %q, want %q", got, "new")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read recreated bucket: %v", err)
+	}
+
+	err = fdb.DropBucket([][]byte{parentName, []byte("missing")})
+	if !checkDbError(t, "DropBucket missing bucket", err,
+		database.ErrBucketNotFound) {
+
+		return
+	}
+
+	err = fdb.DropBucket([][]byte{[]byte("missing"), childName})
+	if !checkDbError(t, "DropBucket missing parent", err,
+		database.ErrBucketNotFound) {
+
+		return
+	}
+
+	err = fdb.DropBucket(nil)
+	if !checkDbError(t, "DropBucket empty path", err,
+		database.ErrBucketNameRequired) {
+
+		return
+	}
+}
+
+// TestDropBucketResume ensures reclaim work that remains on disk when the
+// database is closed picks back up from the recorded resume key when the
+// database is opened again.
+func TestDropBucketResume(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ffldb-dropbucketresume")
+	idb, err := database.Create(dbType, dbPath, blockDataNet)
+	if err != nil {
+		t.Fatalf("Failed to create test database (%s) %v", dbType, err)
+	}
+	defer func() {
+		if idb != nil {
+			idb.Close()
+		}
+	}()
+
+	victimName := []byte("victim")
+	keeperName := []byte("keeper")
+
+	var victimID [4]byte
+	err = idb.Update(func(tx database.Tx) error {
+		victim, err := tx.Metadata().CreateBucket(victimName)
+		if err != nil {
+			return err
+		}
+		keeper, err := tx.Metadata().CreateBucket(keeperName)
+		if err != nil {
+			return err
+		}
+		copy(victimID[:], victim.(*bucket).id[:])
+
+		if err := keeper.Put([]byte("keeper-key"), []byte("keeper")); err != nil {
+			return err
+		}
+		for i := 0; i < 8; i++ {
+			key := []byte(fmt.Sprintf("key-%02d", i))
+			if err := victim.Put(key, []byte{byte(i)}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setup buckets: %v", err)
+	}
+	if err := idb.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+	idb = nil
+
+	// Manufacture the on-disk state of a reclaim that was interrupted
+	// partway through the bucket: the bucket is unlinked from the bucket
+	// index, its keys are still present, and the reclaim record points at
+	// the middle of its key range.
+	ldb, err := leveldb.OpenFile(filepath.Join(dbPath, metadataDbName), nil)
+	if err != nil {
+		t.Fatalf("open raw leveldb: %v", err)
+	}
+	batch := new(leveldb.Batch)
+	batch.Delete(bucketIndexKey(metadataBucketID, victimName))
+	resumeKey := bucketizedKey(victimID, []byte("key-04"))
+	batch.Put(reclaimRecordKey(victimID[:]), resumeKey)
+	if err := ldb.Write(batch, nil); err != nil {
+		t.Fatalf("write raw leveldb: %v", err)
+	}
+	if err := ldb.Close(); err != nil {
+		t.Fatalf("close raw leveldb: %v", err)
+	}
+
+	// Opening the database must resume the reclaim, which deletes the keys
+	// from the resume key onward along with the reclaim record.
+	idb, err = database.Open(dbType, dbPath, blockDataNet)
+	if err != nil {
+		t.Fatalf("Failed to open test database (%s) %v", dbType, err)
+	}
+	fdb := idb.(*db)
+	waitForReclaim(t, fdb, [][]byte{resumeKey, reclaimKeyPrefix})
+
+	// Keys that sort before the resume key were recorded as already
+	// deleted, so the resumed reclaim must not touch them.
+	for i := 0; i < 4; i++ {
+		key := bucketizedKey(victimID, []byte(fmt.Sprintf("key-%02d", i)))
+		has, err := fdb.cache.ldb.Has(key, nil)
+		if err != nil {
+			t.Fatalf("check raw key: %v", err)
+		}
+		if !has {
+			t.Fatalf("raw key %q before the resume key was deleted", key)
+		}
+	}
+	for i := 4; i < 8; i++ {
+		key := bucketizedKey(victimID, []byte(fmt.Sprintf("key-%02d", i)))
+		has, err := fdb.cache.ldb.Has(key, nil)
+		if err != nil {
+			t.Fatalf("check raw key: %v", err)
+		}
+		if has {
+			t.Fatalf("raw key %q from the resume key onward remains", key)
+		}
+	}
+
+	// The unrelated bucket must be untouched.
+	err = idb.View(func(tx database.Tx) error {
+		keeper := tx.Metadata().Bucket(keeperName)
+		if keeper == nil {
+			t.Fatal("keeper bucket is gone")
+		}
+		if got := keeper.Get([]byte("keeper-key")); !bytes.Equal(got, []byte("keeper")) {
+			t.Fatalf("keeper-key value is %q, want %q", got, "keeper")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read keeper bucket: %v", err)
 	}
 }
 

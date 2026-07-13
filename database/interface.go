@@ -485,6 +485,20 @@ type DB interface {
 	Close() error
 }
 
+// BucketDropper is an optional interface a database backend may implement to
+// remove a bucket and everything it contains without visiting every key.
+//
+// DropBucket removes the bucket named by bucketPath, where each element is
+// one nested bucket name from the metadata root, along with its nested
+// buckets and all of their keys.  The bucket is fully removed from the
+// caller's perspective once DropBucket returns.  The backend is free to
+// reclaim the disk space the removed keys occupy in the background after the
+// call returns and must finish any outstanding reclamation when the database
+// is later reopened.
+type BucketDropper interface {
+	DropBucket(bucketPath [][]byte) error
+}
+
 // BucketKeyValue describes one key/value pair to write into a bucket.
 type BucketKeyValue struct {
 	Key   []byte
