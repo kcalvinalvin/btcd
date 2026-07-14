@@ -6,11 +6,17 @@ package indexers
 
 import (
 	"bufio"
+	"bytes"
+	"container/heap"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/btcsuite/btcd/wire/v2"
 )
@@ -30,6 +36,24 @@ const (
 	// byte is uniformly distributed for hashed address types, so records spread
 	// evenly while every entry for an address remains in the same shard.
 	numAddrStagingShards = 256
+	// addrBuildSortMemoryBytes is the approximate combined memory limit for
+	// in-memory runs being sorted concurrently.
+	addrBuildSortMemoryBytes = 256 * 1024 * 1024
+
+	// addrBuildSortMaxWorkers limits concurrent shard sorts to avoid excessive
+	// contention between their staging file reads and run writes.
+	addrBuildSortMaxWorkers = 8
+
+	// addrBuildSortMergeFanIn limits the number of runs merged in one pass.
+	// Larger shards use additional passes instead of opening every run at once.
+	addrBuildSortMergeFanIn = 96
+
+	// addrBuildSortMaxMergeFiles bounds the aggregate files opened by concurrent
+	// run merges, leaving headroom for LevelDB and block file descriptors.
+	addrBuildSortMaxMergeFiles = 256
+
+	// addrBuildProgressInterval is how often build progress is logged.
+	addrBuildProgressInterval = 15 * time.Second
 
 	// addrStagingInterruptCheckRecords is the number of staged records processed
 	// between interrupt checks during long-running staging operations.
@@ -55,6 +79,124 @@ type addrRecord struct {
 	txLen   uint64
 }
 
+// addrRecords implements sort.Interface for address records.
+type addrRecords []addrRecord
+
+func (r addrRecords) Len() int           { return len(r) }
+func (r addrRecords) Less(i, j int) bool { return r[i].less(&r[j]) }
+func (r addrRecords) Swap(i, j int)      { r[i], r[j] = r[j], r[i] }
+
+// addrRecordMergeItem holds the next unmerged record from one sorted run and
+// identifies the run to advance after the record is emitted.
+type addrRecordMergeItem struct {
+	// record is the next unmerged record from the source run.
+	record addrRecord
+
+	// run is the source run's index in the active merge.
+	run int
+}
+
+// addrRecordMergeHeap implements heap.Interface as a min-heap whose root is the
+// next record to emit during a k-way merge.
+type addrRecordMergeHeap []addrRecordMergeItem
+
+func (h addrRecordMergeHeap) Len() int { return len(h) }
+func (h addrRecordMergeHeap) Less(i, j int) bool {
+	return h[i].record.less(&h[j].record)
+}
+func (h addrRecordMergeHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *addrRecordMergeHeap) Push(value any) {
+	*h = append(*h, value.(addrRecordMergeItem))
+}
+func (h *addrRecordMergeHeap) Pop() any {
+	old := *h
+	last := len(old) - 1
+	item := old[last]
+	*h = old[:last]
+	return item
+}
+
+// addrMergeFileLimiter atomically reserves file descriptors for a complete
+// merge so concurrent workers cannot deadlock while each holds a partial set.
+type addrMergeFileLimiter struct {
+	// mu protects open and changed.
+	mu sync.Mutex
+
+	// maxFiles is the maximum number of merge file descriptors reserved at once.
+	maxFiles int
+
+	// open is the number of file descriptors currently reserved.
+	open int
+
+	// changed is closed and replaced when descriptors are released so blocked
+	// reservations wake and retry.
+	changed chan struct{}
+}
+
+// newAddrMergeFileLimiter returns a limiter with capacity for maxFiles merge
+// file descriptors.
+func newAddrMergeFileLimiter(maxFiles int) *addrMergeFileLimiter {
+	return &addrMergeFileLimiter{
+		maxFiles: maxFiles,
+		changed:  make(chan struct{}),
+	}
+}
+
+// acquire reserves all numFiles descriptors as one unit, waiting until they
+// are available or either cancellation channel is closed.
+func (l *addrMergeFileLimiter) acquire(numFiles int, interrupt,
+	stop <-chan struct{}) error {
+
+	if numFiles > l.maxFiles {
+		return fmt.Errorf("address index merge needs %d file descriptors, "+
+			"but the limit is %d", numFiles, l.maxFiles)
+	}
+	for {
+		l.mu.Lock()
+		if l.open+numFiles <= l.maxFiles {
+			l.open += numFiles
+			l.mu.Unlock()
+			return nil
+		}
+		// Capture the notification channel while holding the lock so a release
+		// between unlocking and waiting cannot be missed.
+		changed := l.changed
+		l.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-interrupt:
+			return errInterruptRequested
+		case <-stop:
+			return errInterruptRequested
+		}
+	}
+}
+
+// release returns numFiles descriptors to the shared merge budget and wakes
+// all blocked reservations.
+func (l *addrMergeFileLimiter) release(numFiles int) {
+	l.mu.Lock()
+	l.open -= numFiles
+	close(l.changed)
+	l.changed = make(chan struct{})
+	l.mu.Unlock()
+}
+
+// less orders records by address key, then by the order the incremental path
+// would have inserted the entry: block id ascending, then transaction offset
+// ascending within the block.  Grouping by address key and following that order
+// is what lets the write phase reproduce the on-disk level layout exactly.
+func (r *addrRecord) less(o *addrRecord) bool {
+	if c := bytes.Compare(r.addrKey[:], o.addrKey[:]); c != 0 {
+		return c < 0
+	}
+	if r.blockID != o.blockID {
+		return r.blockID < o.blockID
+	}
+	return r.txStart < o.txStart
+}
+
 // -----------------------------------------------------------------------------
 // During a fast build, the address index writes temporary records to 256
 // append-only shard files.  The first byte of the address hash selects the
@@ -66,6 +208,15 @@ type addrRecord struct {
 // Callers append unsorted records to these files.  Each record includes its
 // complete address key because staging performs no sorting or index-level
 // construction.
+//
+// Sorting splits each shard into bounded in-memory runs.  Shards are sorted
+// concurrently under a shared memory limit, while the runs for each shard are
+// merged on disk into a sorted replacement file.  Since an address never spans
+// shards, each shard can be sorted independently without retaining all sorted
+// records in memory.
+//
+// Unsorted shards end in .tmp.  A completed shard is published with a .sorted
+// suffix only after the sorted contents have been synced.
 //
 // Records are appended without a length prefix because every record has one
 // fixed-width address key followed by exactly three self-delimiting wire
@@ -97,6 +248,13 @@ type addrStagingShard struct {
 	// buf batches varint-encoded record appends to f.
 	buf *bufio.Writer
 
+	// path is the current backing file.  Its suffix records whether the shard
+	// still needs to be sorted.
+	path string
+
+	// sorted is true when path names a completed sorted shard.
+	sorted bool
+
 	// numRecords is the number of complete records in the shard.
 	numRecords uint64
 
@@ -111,7 +269,7 @@ type addrStagingShard struct {
 
 // addrStager owns the hash-prefix shards for one address index fast build.
 // Routing by the first hash160 byte keeps each address in one shard and permits
-// concurrent appends without a global lock.
+// concurrent appends and independent sorting.
 type addrStager struct {
 	// dir contains the staging shard files.
 	dir string
@@ -120,21 +278,23 @@ type addrStager struct {
 	shards [numAddrStagingShards]addrStagingShard
 }
 
-// addrStagingShardPath returns the temporary path for a shard.
-func addrStagingShardPath(dir string, shard int) string {
-	return filepath.Join(dir, fmt.Sprintf("shard-%03d.tmp", shard))
+// addrStagingShardPaths returns the unsorted and sorted paths for a shard.
+func addrStagingShardPaths(dir string, shard int) (string, string) {
+	base := filepath.Join(dir, fmt.Sprintf("shard-%03d", shard))
+	return base + ".tmp", base + ".sorted"
 }
 
 // newAddrStager creates an address record stager in dir.
 func newAddrStager(dir string) (*addrStager, error) {
 	s := &addrStager{dir: dir}
 	for i := range s.shards {
-		path := addrStagingShardPath(dir, i)
+		path, _ := addrStagingShardPaths(dir, i)
 		f, err := os.Create(path)
 		if err != nil {
 			s.closeShards()
 			return nil, err
 		}
+		s.shards[i].path = path
 		s.shards[i].f = f
 		s.shards[i].buf = bufio.NewWriterSize(f, 64*1024)
 	}
@@ -164,6 +324,8 @@ func (s *addrStager) closeShards() {
 	for i := range s.shards {
 		if s.shards[i].f != nil {
 			s.shards[i].f.Close()
+			s.shards[i].f = nil
+			s.shards[i].buf = nil
 		}
 	}
 }
@@ -250,4 +412,549 @@ func writeAddrRecord(w io.Writer, record *addrRecord,
 		return err
 	}
 	return wire.WriteVarIntBuf(w, 0, record.txLen, varIntBuf[:])
+}
+
+// writeAddrStagingShard serializes records into a newly created path.  It
+// removes partial output on failure and, when requested, syncs completed output
+// before retaining it.
+func writeAddrStagingShard(path string, records []addrRecord,
+	syncFile bool, interrupts ...<-chan struct{}) error {
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	// Retain the output only after every record is written, the requested sync
+	// completes, and the file is closed.
+	remove := true
+	defer func() {
+		if f != nil {
+			f.Close()
+		}
+		if remove {
+			os.Remove(path)
+		}
+	}()
+
+	w := bufio.NewWriterSize(f, 64*1024)
+	var varIntBuf [addrVarIntScratchSize]byte
+	for i := range records {
+		if i%addrStagingInterruptCheckRecords == 0 &&
+			addrBuildInterruptRequested(interrupts...) {
+
+			return errInterruptRequested
+		}
+		if err := writeAddrRecord(w, &records[i], &varIntBuf); err != nil {
+			return err
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if syncFile {
+		if err := f.Sync(); err != nil {
+			return err
+		}
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	f = nil
+	remove = false
+	return nil
+}
+
+// publishSortedAddrStagingShard publishes synced sort output before removing
+// its source.
+func publishSortedAddrStagingShard(path, sortingPath, sortedPath string) error {
+	if err := os.Remove(sortedPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(sortingPath, sortedPath); err != nil {
+		return err
+	}
+	if err := syncAddrBuildDir(filepath.Dir(sortedPath)); err != nil {
+		return err
+	}
+	return os.Remove(path)
+}
+
+// mergeAddrStagingRuns performs a k-way merge of the sorted runs into
+// sortedPath.  It keeps only one record from each run in memory.  Input runs
+// are temporary and are removed as they are consumed or if the merge aborts.
+func mergeAddrStagingRuns(runPaths []string, sortedPath string,
+	limiter *addrMergeFileLimiter, interrupts ...<-chan struct{}) error {
+
+	// The first channel is the caller interrupt.  The optional second channel
+	// stops sibling workers after another worker fails.
+	var interrupt, stop <-chan struct{}
+	if len(interrupts) > 0 {
+		interrupt = interrupts[0]
+	}
+	if len(interrupts) > 1 {
+		stop = interrupts[1]
+	}
+	// Reserve every input and the output together so concurrent merges cannot
+	// each hold a partial set of descriptors while waiting for the remainder.
+	fileCount := len(runPaths) + 1
+	if err := limiter.acquire(fileCount, interrupt, stop); err != nil {
+		return err
+	}
+	defer limiter.release(fileCount)
+
+	// runReader owns one input run's path, file, and buffered stream during a
+	// merge.
+	type runReader struct {
+		// path identifies the run file to remove after it is consumed.
+		path string
+
+		// f remains open while the run participates in the merge.
+		f *os.File
+
+		// r preserves buffered input between records from this run.
+		r *bufio.Reader
+	}
+	runs := make([]runReader, len(runPaths))
+	// The original shard remains authoritative until publication, so close and
+	// remove any inputs left behind by an aborted merge.
+	defer func() {
+		for i := range runs {
+			if runs[i].f != nil {
+				runs[i].f.Close()
+			}
+			os.Remove(runs[i].path)
+		}
+	}()
+
+	// Prime the heap with the first record from every run.
+	merged := make(addrRecordMergeHeap, 0, len(runs))
+	var readVarIntBuf [addrVarIntScratchSize]byte
+	for i, path := range runPaths {
+		if addrBuildInterruptRequested(interrupts...) {
+			return errInterruptRequested
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		runs[i] = runReader{
+			path: path,
+			f:    f,
+			r:    bufio.NewReaderSize(f, 64*1024),
+		}
+		merged = append(merged, addrRecordMergeItem{run: i})
+		item := &merged[len(merged)-1]
+		if err := readAddrRecord(runs[i].r, &item.record,
+			&readVarIntBuf); err != nil {
+
+			return err
+		}
+	}
+	heap.Init(&merged)
+
+	f, err := os.Create(sortedPath)
+	if err != nil {
+		return err
+	}
+	// Retain merged output only after it has been flushed, synced, and closed.
+	remove := true
+	defer func() {
+		if f != nil {
+			f.Close()
+		}
+		if remove {
+			os.Remove(sortedPath)
+		}
+	}()
+	w := bufio.NewWriterSize(f, 64*1024)
+	var writeVarIntBuf [addrVarIntScratchSize]byte
+	var numMerged uint64
+	// Repeatedly write the smallest record, then replace it with the next record
+	// from the same run.  Exhausted runs are removed from both the heap and disk.
+	for merged.Len() > 0 {
+		if numMerged%addrStagingInterruptCheckRecords == 0 &&
+			addrBuildInterruptRequested(interrupts...) {
+
+			return errInterruptRequested
+		}
+		item := &merged[0]
+		if err := writeAddrRecord(w, &item.record,
+			&writeVarIntBuf); err != nil {
+
+			return err
+		}
+
+		run := &runs[item.run]
+		err := readAddrRecord(run.r, &item.record, &readVarIntBuf)
+		switch err {
+		case nil:
+			// The replacement record remains at the root, so restore the heap
+			// ordering.
+			heap.Fix(&merged, 0)
+		case io.EOF:
+			heap.Pop(&merged)
+			if err := run.f.Close(); err != nil {
+				return err
+			}
+			run.f = nil
+			if err := os.Remove(run.path); err != nil {
+				return err
+			}
+		case io.ErrUnexpectedEOF:
+			return fmt.Errorf("address index sort run has a truncated record")
+		default:
+			return err
+		}
+		numMerged++
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	f = nil
+	remove = false
+	return nil
+}
+
+// sortAddrStagingShard externally sorts one staging shard using bounded
+// in-memory runs and publishes it under sortedPath when complete.
+func sortAddrStagingShard(path, sortedPath string, numRecords,
+	maxRunRecords int, limiter *addrMergeFileLimiter,
+	interrupts ...<-chan struct{}) error {
+
+	if maxRunRecords < 1 {
+		return fmt.Errorf("address index sort run size must be positive")
+	}
+	mergeFanIn := min(addrBuildSortMergeFanIn, limiter.maxFiles-1)
+	if mergeFanIn < 2 {
+		return fmt.Errorf("address index merge fan-in must be at least two")
+	}
+	if addrBuildInterruptRequested(interrupts...) {
+		return errInterruptRequested
+	}
+	// Sorting always restarts from the authoritative unsorted shard, so discard
+	// artifacts left by an interrupted attempt.
+	sortingPath := path + ".sorting"
+	stalePaths, err := filepath.Glob(path + ".run-*")
+	if err != nil {
+		return err
+	}
+	stalePaths = append(stalePaths, sortingPath, path+".sorted")
+	for _, stalePath := range stalePaths {
+		if err := os.Remove(stalePath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	// Empty and single-record shards are already sorted, so publish them without
+	// creating an intermediate run.
+	if numRecords < 2 {
+		if err := f.Close(); err != nil {
+			return err
+		}
+		if err := os.Remove(sortedPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return os.Rename(path, sortedPath)
+	}
+	r := bufio.NewReaderSize(f, 64*1024)
+
+	numRuns := (numRecords + maxRunRecords - 1) / maxRunRecords
+	runPaths := make([]string, 0, numRuns)
+	// Run files are temporary even when sorting or merging fails.
+	defer func() {
+		runPaths, _ := filepath.Glob(path + ".run-*")
+		for _, runPath := range runPaths {
+			os.Remove(runPath)
+		}
+	}()
+	// Read, sort, and write bounded batches so a shard never needs to fit in
+	// memory as a whole.
+	for first := 0; first < numRecords; first += maxRunRecords {
+		if addrBuildInterruptRequested(interrupts...) {
+			f.Close()
+			return errInterruptRequested
+		}
+		n := min(numRecords-first, maxRunRecords)
+		records, err := readAddrStagingRecords(r, n, interrupts...)
+		if err != nil {
+			f.Close()
+			return err
+		}
+		sort.Sort(addrRecords(records))
+
+		runPath := fmt.Sprintf("%s.run-%03d", path, len(runPaths))
+		runPaths = append(runPaths, runPath)
+		if err := writeAddrStagingShard(runPath, records,
+			numRuns == 1, interrupts...); err != nil {
+
+			f.Close()
+			return err
+		}
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	// Reduce shards with more runs than one merge can safely open through
+	// additional passes.  The limiter reserves every input and output file for
+	// each merge as one unit, so concurrent merges never deadlock on partial
+	// reservations.
+	for pass := 0; len(runPaths) > mergeFanIn; pass++ {
+		nextRunPaths := make([]string, 0,
+			(len(runPaths)+mergeFanIn-1)/mergeFanIn)
+		for first := 0; first < len(runPaths); first += mergeFanIn {
+			end := min(first+mergeFanIn, len(runPaths))
+			if end-first == 1 {
+				nextRunPaths = append(nextRunPaths, runPaths[first])
+				continue
+			}
+
+			mergedPath := fmt.Sprintf("%s.run-merge-%03d-%03d", path,
+				pass, len(nextRunPaths))
+			err := mergeAddrStagingRuns(runPaths[first:end], mergedPath,
+				limiter, interrupts...)
+			if err != nil {
+				return err
+			}
+			nextRunPaths = append(nextRunPaths, mergedPath)
+		}
+		runPaths = nextRunPaths
+	}
+
+	// A lone run was synced when written and only needs renaming.  Multiple runs
+	// need one last merge into an output that mergeAddrStagingRuns syncs.
+	if numRuns == 1 {
+		if err := os.Rename(runPaths[0], sortingPath); err != nil {
+			return err
+		}
+	} else if err := mergeAddrStagingRuns(runPaths, sortingPath,
+		limiter, interrupts...); err != nil {
+
+		return err
+	}
+	if addrBuildInterruptRequested(interrupts...) {
+		return errInterruptRequested
+	}
+	if err := publishSortedAddrStagingShard(path, sortingPath,
+		sortedPath); err != nil {
+
+		return err
+	}
+	return nil
+}
+
+// logAddrStagingSize reports physical staging use and average record size.
+func logAddrStagingSize(label string, numRecords uint64, physicalBytes int64) {
+	if numRecords == 0 {
+		return
+	}
+	const gib = 1024 * 1024 * 1024
+	log.Infof("%s: %.1f GiB on disk for %d records (%.1f bytes/record)",
+		label, float64(physicalBytes)/gib, numRecords,
+		float64(physicalBytes)/float64(numRecords))
+}
+
+// sortAddrStagingShards externally sorts staging shards concurrently under a
+// shared memory limit.  shardSorted is called once for each sorted shard and
+// may be called concurrently.
+func sortAddrStagingShards(stager *addrStager,
+	shardSorted func(int), interrupt <-chan struct{}) error {
+
+	if interruptRequested(interrupt) {
+		return errInterruptRequested
+	}
+	// Make buffered records visible and close append handles before workers
+	// reopen the shard files for sorting.
+	for i := range stager.shards {
+		buf := stager.shards[i].buf
+		if buf != nil {
+			if err := buf.Flush(); err != nil {
+				return err
+			}
+		}
+	}
+	stager.closeShards()
+
+	var (
+		shardRecords   [numAddrStagingShards]uint64
+		unsortedShards []int
+		totalRecords   uint64
+		physicalBytes  int64
+		sortedShards   uint32
+		sortedRecords  uint64
+	)
+	// Snapshot record counts and file sizes, and report shards that a previous
+	// attempt already published instead of scheduling them again.
+	for shard := range stager.shards {
+		sh := &stager.shards[shard]
+		info, err := os.Stat(sh.path)
+		if err != nil {
+			return err
+		}
+		shardRecords[shard] = sh.numRecords
+		totalRecords += shardRecords[shard]
+		physicalBytes += info.Size()
+		if sh.sorted {
+			sortedShards++
+			sortedRecords += shardRecords[shard]
+			shardSorted(shard)
+			continue
+		}
+		unsortedShards = append(unsortedShards, shard)
+	}
+	logAddrStagingSize("Address index staging", totalRecords, physicalBytes)
+	remainingShards := len(unsortedShards)
+	if remainingShards == 0 {
+		log.Infof("Address index sort: %d/%d shards (100.0%%, %d "+
+			"records)", numAddrStagingShards, numAddrStagingShards,
+			totalRecords)
+		return nil
+	}
+	if sortedShards > 0 {
+		log.Infof("Address index sort: %d/%d shards "+
+			"already sorted", sortedShards, numAddrStagingShards)
+	}
+
+	numWorkers := min(runtime.NumCPU(), addrBuildSortMaxWorkers,
+		remainingShards)
+	// Divide the shared memory budget among workers and conservatively charge two
+	// maximum serialized record sizes for each in-memory record.
+	workerMemory := addrBuildSortMemoryBytes / numWorkers
+	maxRunRecords := max(1, workerMemory/(addrRecordMaxSize*2))
+	mergeLimiter := newAddrMergeFileLimiter(addrBuildSortMaxMergeFiles)
+	log.Infof("Sorting address index staging shards using %d workers",
+		numWorkers)
+
+	shards := make(chan int, numWorkers)
+	var (
+		wg           sync.WaitGroup
+		errOnce      sync.Once
+		firstErr     error
+		progressWg   sync.WaitGroup
+		progressDone = make(chan struct{})
+		stop         = make(chan struct{})
+	)
+	// Sorting progress is updated by every worker, so the reporter reads atomic
+	// snapshots until the main function shuts it down.
+	progressWg.Add(1)
+	go func() {
+		defer progressWg.Done()
+		ticker := time.NewTicker(addrBuildProgressInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-progressDone:
+				return
+
+			case <-ticker.C:
+				shards := atomic.LoadUint32(&sortedShards)
+				records := atomic.LoadUint64(&sortedRecords)
+				percent := float64(shards) /
+					float64(numAddrStagingShards) * 100
+				if totalRecords > 0 {
+					percent = float64(records) /
+						float64(totalRecords) * 100
+				}
+				log.Infof("Address index sort: %d/%d shards "+
+					"(%.1f%%, %d/%d records)", shards,
+					numAddrStagingShards, percent, records,
+					totalRecords)
+			}
+		}
+	}()
+	defer func() {
+		close(progressDone)
+		progressWg.Wait()
+	}()
+
+	// Preserve the first error and broadcast cancellation to the feeder, workers,
+	// and merge-file waiters.
+	fail := func(err error) {
+		errOnce.Do(func() {
+			firstErr = err
+			close(stop)
+		})
+	}
+	// Workers sort independent shards but share the memory-derived run size and
+	// file-descriptor limiter.
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for shard := range shards {
+				if addrBuildInterruptRequested(interrupt, stop) {
+					fail(errInterruptRequested)
+					return
+				}
+				path, sortedPath := addrStagingShardPaths(
+					stager.dir, shard)
+				numRecords := int(shardRecords[shard])
+				if uint64(numRecords) != shardRecords[shard] {
+					fail(fmt.Errorf("address index staging shard is too large"))
+					return
+				}
+				if err := sortAddrStagingShard(path, sortedPath,
+					numRecords, maxRunRecords, mergeLimiter, interrupt,
+					stop); err != nil {
+
+					fail(err)
+					return
+				}
+				stager.shards[shard].path = sortedPath
+				stager.shards[shard].sorted = true
+				atomic.AddUint64(&sortedRecords, shardRecords[shard])
+				atomic.AddUint32(&sortedShards, 1)
+				shardSorted(shard)
+			}
+		}()
+	}
+
+	// Stop feeding work as soon as the caller interrupts or any worker fails.
+feed:
+	for _, shard := range unsortedShards {
+		select {
+		case <-stop:
+			break feed
+		case <-interrupt:
+			fail(errInterruptRequested)
+			break feed
+		case shards <- shard:
+		}
+	}
+	close(shards)
+	wg.Wait()
+	if firstErr == nil {
+		log.Infof("Address index sort: %d/%d shards (100.0%%, %d "+
+			"records)", numAddrStagingShards, numAddrStagingShards,
+			totalRecords)
+	}
+	return firstErr
+}
+
+// syncAddrBuildDir makes published staging names durable.  Windows does not
+// support syncing directory handles through os.File.
+func syncAddrBuildDir(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		dir.Close()
+		return err
+	}
+	return dir.Close()
 }
