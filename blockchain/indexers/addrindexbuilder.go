@@ -67,6 +67,12 @@ const (
 	// to the database.
 	addrBuildManifestName = "manifest"
 
+	// addrBuildMinBlocks is the minimum number of blocks the address index
+	// must be behind the best chain tip for a fast build to be worth its
+	// staging and write phase overhead.  The per-block catchup handles
+	// smaller gaps.
+	addrBuildMinBlocks = 1000
+
 	// addrBuildWriteBatchBytes is the approximate number of value bytes buffered
 	// before a database transaction is committed during the write phase.  It
 	// bounds the memory a single transaction holds since address index values
