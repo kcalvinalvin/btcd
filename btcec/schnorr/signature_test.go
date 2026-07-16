@@ -216,7 +216,7 @@ func TestSchnorrVerify(t *testing.T) {
 
 		pubKeyBytes := decodeHex(test.publicKey)
 
-		_, err := ParsePubKey(pubKeyBytes)
+		pubKey, err := ParsePubKey(pubKeyBytes)
 		switch {
 		case !test.validPubKey && err != nil:
 			if !errors.Is(err, test.expectErr) {
@@ -248,11 +248,33 @@ func TestSchnorrVerify(t *testing.T) {
 			t.Fatalf("test #%v: verification mismatch: expected "+
 				"%v, got %v", i, test.verifyResult, verify)
 		}
+		if got := sig.Verify(msg, pubKey); got != verify {
+			t.Fatalf("test #%v: Signature.Verify returned %v, want %v",
+				i, got, verify)
+		}
 
 		if !test.verifyResult && test.expectErr != nil {
 			if !errors.Is(err, test.expectErr) {
 				t.Fatalf("test #%v: expect error %v : got %v", i, test.expectErr, err)
 			}
+		}
+	}
+
+	// Both verification backends reject messages that are not exactly 32
+	// bytes, as required by BIP340.
+	vector := bip340TestVectors[0]
+	pubKey, err := ParsePubKey(decodeHex(vector.publicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := ParseSignature(decodeHex(vector.signature))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range []int{31, 33} {
+		msg := make([]byte, size)
+		if sig.Verify(msg, pubKey) {
+			t.Fatalf("Signature.Verify accepted a %d-byte message", size)
 		}
 	}
 }
