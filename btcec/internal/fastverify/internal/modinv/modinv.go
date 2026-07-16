@@ -126,6 +126,14 @@ var scalarModInfo = newModInfo([32]byte{
 	0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
 })
 
+// fieldModInfo inverts modulo the field prime p.
+var fieldModInfo = newModInfo([32]byte{
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+	0xFF, 0xFF, 0xFF, 0xFE, 0xFF, 0xFF, 0xFC, 0x2F,
+})
+
 // neginv256 holds the negated inverses of the odd bytes: entry i is
 // -(2i+1)^-1 mod 2^8, used to cancel the low bits of g against f.
 var neginv256 = func() [128]uint8 {
@@ -342,4 +350,12 @@ func ScalarInverse(s *secp.ModNScalar) {
 	scalarModInfo.invVar(&x)
 	nb := x.bytes()
 	s.SetBytes(&nb)
+}
+
+// FieldInverse returns the multiplicative inverse of the canonical field
+// element b modulo the field prime in variable time. Zero maps to zero.
+func FieldInverse(b [32]byte) [32]byte {
+	x := signed62FromBytes(&b)
+	fieldModInfo.invVar(&x)
+	return x.bytes()
 }
