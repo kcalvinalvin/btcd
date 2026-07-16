@@ -484,3 +484,9 @@ type DB interface {
 	// back or committed).
 	Close() error
 }
+
+// Flusher is an optional interface a database backend may implement to force
+// pending writes to its durable backing store before returning.
+type Flusher interface {
+	Flush() error
+}
