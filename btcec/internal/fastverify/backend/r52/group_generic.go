@@ -13,3 +13,7 @@ func jacDouble(p, a *jacobianPoint) {
 func jacAddMixed(p, a *jacobianPoint, b *affinePoint) {
 	addMixedGeneric(p, a, b)
 }
+
+func runLadder(acc, gacc *jacobianPoint, ops []ladderOp) {
+	runLadderGeneric(acc, gacc, ops)
+}

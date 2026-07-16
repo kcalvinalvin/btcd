@@ -88,23 +88,67 @@ func commonZ(table *[8]jacobianPoint, out *[8]affinePoint) fe {
 	return zGlobal
 }
 
-// addDigit adds digit*entry to acc where entry is table[|digit|/2] and
-// digit is a nonzero odd wNAF digit, negated when neg is set.
-func addDigit(acc *jacobianPoint, table *[8]affinePoint, digit int8, neg bool) {
+// negateTable fills neg with the negated points of table, so digit signs
+// resolve to a table pick instead of a per-use negation.
+func negateTable(table, neg *[8]affinePoint) {
+	for i := range table {
+		neg[i].X = table[i].X
+		y := table[i].Y
+		y.Negate(1)
+		y.normalizeWeak()
+		neg[i].Y = y
+	}
+}
+
+// digitEntry returns the table entry for a nonzero odd wNAF digit, picking
+// the negated table when the signs work out negative.
+func digitEntry(pos, neg *[8]affinePoint, digit int8,
+	negate bool) *affinePoint {
+
 	d := digit
-	if neg {
+	if negate {
 		d = -d
 	}
-	idx := d
-	if idx < 0 {
-		idx = -idx
-	}
-	entry := table[idx/2]
 	if d < 0 {
-		entry.Y.Negate(1)
-		entry.Y.normalizeWeak()
+		return &neg[-d/2]
 	}
-	acc.AddMixed(acc, &entry)
+	return &pos[d/2]
+}
+
+// Ladder op kinds: a doubling, a doubling paired with a G-chain addition,
+// and an accumulator addition.
+const (
+	opDouble uint64 = iota
+	opDoubleG
+	opAdd
+
+	// A schedule has at most scalar.MaxWNAFLen-1 doublings and two nonzero
+	// digits per five positions. Round that 185-op bound up for headroom.
+	maxLadderOps = 192
+)
+
+// ladderOp is one step of a precomputed ladder schedule. Every digit and
+// pairing decision is resolved up front so the runner sees only finite point
+// operations on prebuilt table entries.
+type ladderOp struct {
+	kind  uint64
+	entry *affinePoint
+}
+
+// runLadderGeneric walks a ladder schedule with portable point operations.
+func runLadderGeneric(acc, gacc *jacobianPoint, ops []ladderOp) {
+	for i := range ops {
+		op := &ops[i]
+		switch op.kind {
+		case opDouble:
+			acc.Double(acc)
+		case opDoubleG:
+			acc.Double(acc)
+			gacc.AddMixed(gacc, op.entry)
+		case opAdd:
+			acc.AddMixed(acc, op.entry)
+		}
+	}
 }
 
 // dualBaseMult computes u1*G + u2*Q using the fixed-point table for the G
@@ -155,7 +199,7 @@ func dualBaseMult(u1, u2 *secp.ModNScalar, q *affinePoint) jacobianPoint {
 		// frame.
 		var qTableJ [8]jacobianPoint
 		zd := oddMultiples(q, &qTableJ)
-		var qTable, lqTable [8]affinePoint
+		var qTable, lqTable, negQTable, negLqTable [8]affinePoint
 		zGlobal := commonZ(&qTableJ, &qTable)
 		zGlobal.Mul(&zGlobal, &zd)
 		for i := range qTable {
@@ -163,26 +207,60 @@ func dualBaseMult(u1, u2 *secp.ModNScalar, q *affinePoint) jacobianPoint {
 			lqTable[i].X.Mul(&qTable[i].X, &endoBeta)
 			lqTable[i].X.normalizeWeak()
 		}
+		negateTable(&qTable, &negQTable)
+		negateTable(&lqTable, &negLqTable)
 
 		l := l1
 		if l2 > l {
 			l = l2
 		}
+		// Seed the accumulator from the top digits, then compile the rest
+		// into a schedule of finite point operations.
+		var ops [maxLadderOps]ladderOp
+		nOps := 0
+		seeded := false
 		for i := l - 1; i >= 0; i-- {
-			if gi < nG && !acc.Inf && !gacc.Inf {
-				acc.Double(&acc)
-				gacc.AddMixed(&gacc, gEntries[gi])
-				gi++
-			} else {
-				acc.Double(&acc)
-			}
+			var e1, e2 *affinePoint
 			if i < l1 && d1[i] != 0 {
-				addDigit(&acc, &qTable, d1[i], n1)
+				e1 = digitEntry(&qTable, &negQTable, d1[i], n1)
 			}
 			if i < l2 && d2[i] != 0 {
-				addDigit(&acc, &lqTable, d2[i], n2)
+				e2 = digitEntry(&lqTable, &negLqTable, d2[i], n2)
+			}
+			if !seeded {
+				if e1 == nil && e2 == nil {
+					continue
+				}
+				if e1 != nil {
+					acc.SetAffine(e1)
+					if e2 != nil {
+						acc.AddMixed(&acc, e2)
+					}
+				} else {
+					acc.SetAffine(e2)
+				}
+				seeded = true
+				continue
+			}
+			if gi < nG {
+				ops[nOps] = ladderOp{
+					kind: opDoubleG, entry: gEntries[gi],
+				}
+				gi++
+			} else {
+				ops[nOps] = ladderOp{kind: opDouble}
+			}
+			nOps++
+			if e1 != nil {
+				ops[nOps] = ladderOp{kind: opAdd, entry: e1}
+				nOps++
+			}
+			if e2 != nil {
+				ops[nOps] = ladderOp{kind: opAdd, entry: e2}
+				nOps++
 			}
 		}
+		runLadder(&acc, &gacc, ops[:nOps])
 
 		// Leave the rescaled curve: the accumulator's true Z carries the
 		// shared denominator.

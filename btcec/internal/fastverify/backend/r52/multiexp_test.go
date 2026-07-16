@@ -7,6 +7,7 @@ package r52
 import (
 	"crypto/rand"
 	"testing"
+	"unsafe"
 
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
@@ -34,6 +35,106 @@ func randomScalar(t testing.TB) secp.ModNScalar {
 	var scalar secp.ModNScalar
 	scalar.SetBytes(&raw)
 	return scalar
+}
+
+func TestDigitEntry(t *testing.T) {
+	var pos, neg [8]affinePoint
+	for i := range pos {
+		pos[i].X.SetUint64(uint64(i + 1))
+		pos[i].Y.SetUint64(uint64(i + 17))
+	}
+	negateTable(&pos, &neg)
+	for i := range pos {
+		if neg[i].X.n != pos[i].X.n {
+			t.Fatalf("entry %d: negation changed x", i)
+		}
+		wantY := pos[i].Y
+		wantY.Negate(1)
+		wantY.normalizeWeak()
+		if neg[i].Y.n != wantY.n {
+			t.Fatalf("entry %d: negated y mismatch", i)
+		}
+	}
+
+	for digit := int8(-15); digit <= 15; digit += 2 {
+		if digit == 0 {
+			continue
+		}
+		for _, negate := range []bool{false, true} {
+			d := digit
+			if negate {
+				d = -d
+			}
+			var want *affinePoint
+			if d < 0 {
+				want = &neg[-d/2]
+			} else {
+				want = &pos[d/2]
+			}
+			if got := digitEntry(&pos, &neg, digit, negate); got != want {
+				t.Fatalf("digit %d negate %v: wrong table entry",
+					digit, negate)
+			}
+		}
+	}
+}
+
+func TestLadderOpABI(t *testing.T) {
+	var op ladderOp
+	if opDouble != 0 || opDoubleG != 1 || opAdd != 2 {
+		t.Fatalf("unexpected op values: %d %d %d",
+			opDouble, opDoubleG, opAdd)
+	}
+	if got := unsafe.Sizeof(op); got != 16 {
+		t.Fatalf("ladderOp size: got %d want 16", got)
+	}
+	if got := unsafe.Offsetof(op.kind); got != 0 {
+		t.Fatalf("kind offset: got %d want 0", got)
+	}
+	if got := unsafe.Offsetof(op.entry); got != 8 {
+		t.Fatalf("entry offset: got %d want 8", got)
+	}
+}
+
+func TestRunLadderGeneric(t *testing.T) {
+	da := randomDcrecPoint(t)
+	dg := randomDcrecPoint(t)
+	db := randomDcrecPoint(t)
+	dc := randomDcrecPoint(t)
+	db.ToAffine()
+	dc.ToAffine()
+
+	acc := fromDcrecJacobian(t, &da)
+	gacc := fromDcrecJacobian(t, &dg)
+	mb := fromDcrecJacobian(t, &db)
+	mc := fromDcrecJacobian(t, &dc)
+	b := affinePoint{X: mb.X, Y: mb.Y}
+	c := affinePoint{X: mc.X, Y: mc.Y}
+	ops := []ladderOp{
+		{kind: opDouble},
+		{kind: opDoubleG, entry: &b},
+		{kind: opAdd, entry: &c},
+	}
+	runLadderGeneric(&acc, &gacc, ops)
+
+	var twoA, fourA, wantAcc, wantG secp.JacobianPoint
+	secp.DoubleNonConst(&da, &twoA)
+	secp.DoubleNonConst(&twoA, &fourA)
+	secp.AddNonConst(&fourA, &dc, &wantAcc)
+	secp.AddNonConst(&dg, &db, &wantG)
+	comparePoints(t, "ladder accumulator", &acc, &wantAcc)
+	comparePoints(t, "ladder G accumulator", &gacc, &wantG)
+
+	// The portable runner also preserves the point wrappers' infinity
+	// behavior, which is useful when replaying adversarial schedules.
+	acc.SetInfinity()
+	gacc.SetInfinity()
+	runLadderGeneric(&acc, &gacc, []ladderOp{
+		{kind: opDoubleG, entry: &b},
+		{kind: opAdd, entry: &c},
+	})
+	comparePoints(t, "infinity accumulator", &acc, &dc)
+	comparePoints(t, "infinity G accumulator", &gacc, &db)
 }
 
 func TestDualBaseMultMatchesDcrec(t *testing.T) {

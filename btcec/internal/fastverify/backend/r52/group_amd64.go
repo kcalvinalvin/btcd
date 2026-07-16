@@ -42,3 +42,7 @@ func jacAddMixed(p, a *jacobianPoint, b *affinePoint) {
 	}
 	p.Inf = false
 }
+
+func runLadder(acc, gacc *jacobianPoint, ops []ladderOp) {
+	runLadderGeneric(acc, gacc, ops)
+}
