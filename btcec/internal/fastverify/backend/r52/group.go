@@ -4,6 +4,8 @@
 
 package r52
 
+//go:generate go run gen_ifma_cdf.go
+
 // affinePoint is a point on the secp256k1 curve in affine coordinates with
 // weak-normalized coordinates. Tables only ever hold finite points, so the
 // type cannot represent the point at infinity.

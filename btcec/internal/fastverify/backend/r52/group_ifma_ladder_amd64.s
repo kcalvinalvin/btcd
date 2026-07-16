@@ -14,9 +14,13 @@
 // and the G chain point lives in its caller memory through R11. Op kinds:
 // 0 doubles the accumulator, 1 doubles it while adding an entry to the G
 // chain with the two streams interleaved, 2 adds an entry to the
-// accumulator. On a nonzero return, from a degenerate shared-x addition
-// or an accumulated carry-pass leftover, both points may hold partial
-// results and the caller must redo the schedule from saved copies.
+// accumulator. The doubling bodies never reduce D and F on their own:
+// X3 = F - 2*D and T = 3*D - F form as column combinations of the two
+// unreduced product forms through the ifmaCDF constant, saving both
+// reduction tails. On a nonzero return, from a degenerate shared-x
+// addition or an accumulated carry-pass leftover, both points may hold
+// partial results and the caller must redo the schedule from saved
+// copies.
 TEXT ·ladderRunIFMA(SB), NOSPLIT, $384-48
 	MOVQ acc+0(FP), DI
 	MOVQ gacc+8(FP), R11
@@ -202,7 +206,6 @@ ladderD:
 	VPSLLQ $2, Z10, Z10
 	VPSLLQ $2, Z12, Z12
 	REDFOLD(Z21)
-	REDTAIL2(Z21)
 	BALIGN(Z27)
 	ZEROACC
 	MROWS(Z27, Z27)
@@ -221,15 +224,14 @@ ladderD:
 	VPSLLQ $3, Z12, Z0
 	VPADDQ Z0, Z12, Z12
 	REDFOLD(Z27)
-	REDTAIL2(Z27)
 	VPSLLQ $1, Z21, Z0
-	VMOVDQU64 ifmaC32<>(SB), Z13
+	VMOVDQU64 ifmaCDF<>(SB), Z13
+	VPADDQ Z0, Z21, Z14
+	VPADDQ Z13, Z14, Z21
+	VPSUBQ Z27, Z21, Z21
 	VPADDQ Z13, Z27, Z27
 	VPSUBQ Z0, Z27, Z27
-	VMOVDQU64 ifmaC512<>(SB), Z13
-	VPADDQ Z13, Z21, Z21
-	VPSUBQ Z27, Z21, Z21
-	PASSF2(Z21)
+	REDTAIL2(Z21)
 	BALIGN(Z21)
 	ZEROACC
 	MROWS(Z31, Z21)
@@ -242,7 +244,7 @@ ladderD:
 	VPADDQ Z0, Z12, Z12
 	REDFOLD(Z31)
 	REDTAIL2(Z31)
-	WEAKOUT2(Z27)
+	REDTAILW(Z27)
 	VMOVDQU64.Z 320(SP), K1, Z14
 	VPSLLQ $3, Z14, Z0
 	VMOVDQU64 ifmaC8<>(SB), Z13
@@ -336,7 +338,6 @@ ladderDG:
 	ZEROACC
 	MROWS(Z16, Z16)
 	MERGE
-	REDTAIL2(Z21)
 	REDFOLD(Z19)
 	BALIGN(Z27)
 	ZEROACC
@@ -374,15 +375,14 @@ ladderDG:
 	VPSLLQ $2, Z10, Z10
 	VPSLLQ $2, Z12, Z12
 	VMOVDQU64 Z19, K1, 128(SP)
-	REDTAIL2(Z27)
 	VPSLLQ $1, Z21, Z0
-	VMOVDQU64 ifmaC32<>(SB), Z13
+	VMOVDQU64 ifmaCDF<>(SB), Z13
+	VPADDQ Z0, Z21, Z14
+	VPADDQ Z13, Z14, Z21
+	VPSUBQ Z27, Z21, Z21
 	VPADDQ Z13, Z27, Z27
 	VPSUBQ Z0, Z27, Z27
-	VMOVDQU64 ifmaC512<>(SB), Z13
-	VPADDQ Z13, Z21, Z21
-	VPSUBQ Z27, Z21, Z21
-	PASSF2(Z21)
+	REDTAIL2(Z21)
 	REDFOLD(Z19)
 	BALIGN(Z21)
 	ZEROACC
@@ -404,7 +404,7 @@ ladderDG:
 	MROWS(Z18, Z19)
 	MERGE
 	REDTAIL2(Z31)
-	WEAKOUT2(Z27)
+	REDTAILW(Z27)
 	VMOVDQU64.Z 320(SP), K1, Z14
 	VPSLLQ $3, Z14, Z0
 	VMOVDQU64 ifmaC8<>(SB), Z13

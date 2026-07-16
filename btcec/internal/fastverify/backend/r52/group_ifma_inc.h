@@ -6,6 +6,10 @@
 // group_ifma_amd64.s for the design commentary and the register
 // conventions every macro assumes.
 
+// ifmaCDF represents (2^50 + 2048)*p in unreduced base-2^52 columns.
+// Its lane-five bias keeps fused doubling subtractions nonnegative.
+#include "ifma_cdf_generated.h"
+
 // The 2*twoP per-limb negation constants, as in FESUB2.
 DATA ifmaC2<>+0(SB)/8, $0x3FFFFBFFFFF0BC
 DATA ifmaC2<>+8(SB)/8, $0x3FFFFFFFFFFFFC
