@@ -22,14 +22,23 @@ var (
 	}
 )
 
-// gTable holds points[j][v] = v * 2^(8j) * G in affine coordinates for
-// window j of a base 256 fixed-point multiplication, so a full 256-bit
-// scalar multiple of G costs at most 32 mixed additions and no doublings.
-// Row entry 0 is unused. The table is about 640 KiB and is built once on
-// first use.
+// G table geometry: base 2^gWindowBits windows over the scalar, so a
+// full multiple of G costs at most gWindows mixed additions and no
+// doublings. Larger windows trade table memory for fewer additions; 12
+// bits lands at about 7 MiB, comparable to the large fixed tables the C
+// implementations configure for verification hosts.
+const (
+	gWindowBits = 12
+	gWindows    = (256 + gWindowBits - 1) / gWindowBits
+	gTableSize  = 1 << gWindowBits
+)
+
+// gTable holds points[j][v] = v * 2^(gWindowBits*j) * G in affine
+// coordinates for window j. Row entry 0 is unused. The table builds once
+// on first use.
 var (
 	gTableOnce sync.Once
-	gTable     *[32][256]affinePoint
+	gTable     *[gWindows][gTableSize]affinePoint
 )
 
 // batchToAffine converts a slice of finite Jacobian points to affine using
@@ -65,51 +74,70 @@ func batchToAffine(points []jacobianPoint, out []affinePoint) {
 	}
 }
 
-// buildGTable computes the fixed-point table for G.
-func buildGTable() {
-	table := new([32][256]affinePoint)
+// generateGTable computes the fixed-point table for G.
+func generateGTable() *[gWindows][gTableSize]affinePoint {
+	table := new([gWindows][gTableSize]affinePoint)
 
 	var g affinePoint
 	g.X.SetBytes(&gxBytes)
 	g.Y.SetBytes(&gyBytes)
 
-	// Window bases 2^(8j) * G as Jacobian points.
-	var bases [32]jacobianPoint
+	// Window bases 2^(gWindowBits*j) * G as Jacobian points.
+	var bases [gWindows]jacobianPoint
 	bases[0].SetAffine(&g)
-	for j := 1; j < 32; j++ {
+	for j := 1; j < gWindows; j++ {
 		bases[j] = bases[j-1]
-		for d := 0; d < 8; d++ {
+		for d := 0; d < gWindowBits; d++ {
 			bases[j].Double(&bases[j])
 		}
 	}
-	var basesAff [32]affinePoint
+	var basesAff [gWindows]affinePoint
 	batchToAffine(bases[:], basesAff[:])
 
 	// Each row accumulates v * base with mixed additions, then the whole
-	// table converts to affine with one inversion.
-	rows := make([]jacobianPoint, 32*255)
-	for j := 0; j < 32; j++ {
+	// table converts to affine with one inversion. The top window only
+	// needs the values its remaining scalar bits can take.
+	rowSize := make([]int, gWindows)
+	total := 0
+	for j := 0; j < gWindows; j++ {
+		bits := 256 - gWindowBits*j
+		if bits > gWindowBits {
+			bits = gWindowBits
+		}
+		rowSize[j] = 1<<bits - 1
+		total += rowSize[j]
+	}
+	rows := make([]jacobianPoint, total)
+	base := 0
+	for j := 0; j < gWindows; j++ {
 		var acc jacobianPoint
 		acc.SetAffine(&basesAff[j])
-		rows[j*255] = acc
-		for v := 2; v <= 255; v++ {
+		rows[base] = acc
+		for v := 2; v <= rowSize[j]; v++ {
 			acc.AddMixed(&acc, &basesAff[j])
-			rows[j*255+v-1] = acc
+			rows[base+v-1] = acc
 		}
+		base += rowSize[j]
 	}
-	rowsAff := make([]affinePoint, 32*255)
+	rowsAff := make([]affinePoint, total)
 	batchToAffine(rows, rowsAff)
-	for j := 0; j < 32; j++ {
-		for v := 1; v <= 255; v++ {
-			table[j][v] = rowsAff[j*255+v-1]
+	base = 0
+	for j := 0; j < gWindows; j++ {
+		for v := 1; v <= rowSize[j]; v++ {
+			table[j][v] = rowsAff[base+v-1]
 		}
+		base += rowSize[j]
 	}
 
-	gTable = table
+	return table
+}
+
+func buildGTable() {
+	gTable = generateGTable()
 }
 
 // baseTable returns the lazily built fixed-point table for G.
-func baseTable() *[32][256]affinePoint {
+func baseTable() *[gWindows][gTableSize]affinePoint {
 	gTableOnce.Do(buildGTable)
 	return gTable
 }

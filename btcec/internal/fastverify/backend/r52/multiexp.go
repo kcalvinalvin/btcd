@@ -149,6 +149,30 @@ func runLadderGeneric(acc, gacc *jacobianPoint, ops []ladderOp) {
 	}
 }
 
+// scalarWordsLE returns the scalar as four little-endian 64-bit words.
+func scalarWordsLE(s *secp.ModNScalar) [4]uint64 {
+	b := s.Bytes()
+	var words [4]uint64
+	for i := range words {
+		for j := 0; j < 8; j++ {
+			words[i] |= uint64(b[31-8*i-j]) << (8 * j)
+		}
+	}
+	return words
+}
+
+// fixedWindowValue extracts one gWindowBits-wide fixed-base window.
+func fixedWindowValue(words *[4]uint64, window int) uint64 {
+	bit := gWindowBits * window
+	word := bit / 64
+	shift := bit % 64
+	value := words[word] >> shift
+	if shift > 64-gWindowBits && word+1 < len(words) {
+		value |= words[word+1] << (64 - shift)
+	}
+	return value & (gTableSize - 1)
+}
+
 // dualBaseMult computes u1*G + u2*Q using the fixed-point table for the G
 // term and a GLV split Strauss wNAF loop for the Q term. The G term
 // accumulates on its own chain in the unscaled frame so its additions can be
@@ -158,16 +182,14 @@ func dualBaseMult(u1, u2 *secp.ModNScalar, q *affinePoint) jacobianPoint {
 	var acc jacobianPoint
 	acc.SetInfinity()
 
-	// G term: base 256 windows over the fixed table, no doublings needed.
-	var gEntries [32]*affinePoint
+	// G term: fixed windows over the precomputed table, no doublings needed.
+	var gEntries [gWindows]*affinePoint
 	nG := 0
 	if !u1.IsZero() {
 		table := baseTable()
-		b := u1.Bytes()
-		for j := 0; j < 32; j++ {
-			// Window j covers bits 8j..8j+7, byte 31-j in the big
-			// endian encoding.
-			if v := b[31-j]; v != 0 {
+		words := scalarWordsLE(u1)
+		for j := 0; j < gWindows; j++ {
+			if v := fixedWindowValue(&words, j); v != 0 {
 				gEntries[nG] = &table[j][v]
 				nG++
 			}

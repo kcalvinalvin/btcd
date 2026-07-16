@@ -6,6 +6,7 @@ package r52
 
 import (
 	"crypto/rand"
+	"fmt"
 	"testing"
 	"unsafe"
 
@@ -135,6 +136,71 @@ func TestRunLadderGeneric(t *testing.T) {
 	})
 	comparePoints(t, "infinity accumulator", &acc, &dc)
 	comparePoints(t, "infinity G accumulator", &gacc, &db)
+}
+
+func expectedWindow(bytes *[32]byte, window int) uint64 {
+	start := gWindowBits * window
+	var value uint64
+	for bit := 0; bit < gWindowBits && start+bit < 256; bit++ {
+		position := start + bit
+		value |= uint64(bytes[31-position/8]>>uint(position%8)&1) <<
+			uint(bit)
+	}
+	return value
+}
+
+func TestFixedWindowValue(t *testing.T) {
+	check := func(name string, scalar secp.ModNScalar) {
+		t.Helper()
+		bytes := scalar.Bytes()
+		words := scalarWordsLE(&scalar)
+		for window := 0; window < gWindows; window++ {
+			got := fixedWindowValue(&words, window)
+			want := expectedWindow(&bytes, window)
+			if got != want {
+				t.Fatalf("%s window %d: got %#x want %#x",
+					name, window, got, want)
+			}
+		}
+	}
+
+	// Every scalar bit exercises the positions on both sides of each
+	// 12-bit and 64-bit boundary, including the four-bit top window.
+	for bit := 0; bit < 256; bit++ {
+		var raw [32]byte
+		raw[31-bit/8] = 1 << uint(bit%8)
+		var scalar secp.ModNScalar
+		scalar.SetBytes(&raw)
+		check(fmt.Sprintf("bit %d", bit), scalar)
+	}
+
+	var one secp.ModNScalar
+	one.SetInt(1)
+	orderMinusOne := one
+	orderMinusOne.Negate()
+	check("order minus one", orderMinusOne)
+}
+
+func TestGTableGeometry(t *testing.T) {
+	if gWindowBits != 12 || gWindows != 22 || gTableSize != 4096 {
+		t.Fatalf("unexpected geometry: bits=%d windows=%d size=%d",
+			gWindowBits, gWindows, gTableSize)
+	}
+	const wantBytes = 7_208_960
+	if got := unsafe.Sizeof([gWindows][gTableSize]affinePoint{}); got != wantBytes {
+		t.Fatalf("table bytes: got %d want %d", got, wantBytes)
+	}
+}
+
+var benchmarkGTable *[gWindows][gTableSize]affinePoint
+
+func BenchmarkGenerateGTableCold(b *testing.B) {
+	b.ReportAllocs()
+	tableBytes := unsafe.Sizeof([gWindows][gTableSize]affinePoint{})
+	b.ReportMetric(float64(tableBytes)/(1<<20), "MiB/table")
+	for i := 0; i < b.N; i++ {
+		benchmarkGTable = generateGTable()
+	}
 }
 
 func TestDualBaseMultMatchesDcrec(t *testing.T) {
