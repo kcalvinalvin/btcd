@@ -958,3 +958,274 @@ func syncAddrBuildDir(path string) error {
 	}
 	return dir.Close()
 }
+
+// memAddrBucket is an in-memory internalBucket used to replay one address
+// key's entries through dbPutAddrIndexEntry so the write phase produces the
+// same level keys and values the incremental path would.
+type memAddrBucket struct {
+	levels map[[levelKeySize]byte][]byte
+}
+
+// Get returns the value associated with the key.
+//
+// This is part of the internalBucket interface.
+func (b *memAddrBucket) Get(key []byte) []byte {
+	var levelKey [levelKeySize]byte
+	copy(levelKey[:], key)
+	return b.levels[levelKey]
+}
+
+// Put stores the provided key/value pair.  The address index helpers pass owned
+// values and do not mutate them after a put, so retaining the slice avoids a
+// redundant copy for every intermediate level update.
+//
+// This is part of the internalBucket interface.
+func (b *memAddrBucket) Put(key []byte, value []byte) error {
+	var levelKey [levelKeySize]byte
+	copy(levelKey[:], key)
+	b.levels[levelKey] = value
+	return nil
+}
+
+// Delete removes the provided key.
+//
+// This is part of the internalBucket interface.
+func (b *memAddrBucket) Delete(key []byte) error {
+	var levelKey [levelKeySize]byte
+	copy(levelKey[:], key)
+	delete(b.levels, levelKey)
+	return nil
+}
+
+// reset clears the bucket so it can be reused for the next address key.
+func (b *memAddrBucket) reset() {
+	clear(b.levels)
+}
+
+// addrLevelEntryCountsInterruptible returns the final number of entries in each
+// address index level after inserting numEntries entries.  It mirrors the level
+// moves performed by dbPutAddrIndexEntry without constructing intermediate
+// values.
+func addrLevelEntryCountsInterruptible(numEntries int,
+	interrupts ...<-chan struct{}) ([]int, error) {
+
+	if numEntries == 0 {
+		return nil, nil
+	}
+
+	levels := []int{0}
+	for entry := 0; entry < numEntries; entry++ {
+		if entry%addrStagingInterruptCheckRecords == 0 &&
+			addrBuildInterruptRequested(interrupts...) {
+
+			return nil, errInterruptRequested
+		}
+		if levels[0] < level0MaxEntries {
+			levels[0]++
+			continue
+		}
+
+		prevLevelEntries := levels[0]
+		maxEntries := level0MaxEntries * 2
+		level := 1
+		for {
+			if level == len(levels) {
+				levels = append(levels, 0)
+			}
+			if levels[level] == maxEntries {
+				prevLevelEntries = levels[level]
+				maxEntries *= 2
+				level++
+				continue
+			}
+
+			levels[level] += prevLevelEntries
+			for mergeLevel := level - 1; mergeLevel > 0; mergeLevel-- {
+				levels[mergeLevel] = levels[mergeLevel-1]
+			}
+			levels[0] = 1
+			break
+		}
+	}
+	return levels, nil
+}
+
+// buildAddrLevelValuesInterruptible constructs the final level values for one
+// new address from records in canonical order.  Building each value once avoids
+// the repeated allocations and copies incremental level merging would perform.
+func buildAddrLevelValuesInterruptible(records []addrRecord,
+	interrupts ...<-chan struct{}) ([][]byte, error) {
+
+	levelCounts, err := addrLevelEntryCountsInterruptible(
+		len(records), interrupts...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	levels := make([][]byte, len(levelCounts))
+	recordIdx := 0
+	for level := len(levelCounts) - 1; level >= 0; level-- {
+		value := make([]byte, levelCounts[level]*txEntrySize)
+		for offset := 0; offset < len(value); offset += txEntrySize {
+			if recordIdx%addrStagingInterruptCheckRecords == 0 &&
+				addrBuildInterruptRequested(interrupts...) {
+
+				return nil, errInterruptRequested
+			}
+			record := &records[recordIdx]
+			byteOrder.PutUint32(value[offset:], uint32(record.blockID))
+			byteOrder.PutUint32(value[offset+4:], uint32(record.txStart))
+			byteOrder.PutUint32(value[offset+8:], uint32(record.txLen))
+			recordIdx++
+		}
+		levels[level] = value
+	}
+	return levels, nil
+}
+
+// emitSortedAddrLevelEntries groups sorted records by address key, rebuilds
+// their final level values, and invokes emit for every produced level key in
+// ascending level order.  New addresses are built directly, while addresses
+// with existing levels are replayed through dbPutAddrIndexEntry against
+// memBucket so interrupted and incremental builds preserve their existing
+// state.  memBucket is reused across groups and must be non-nil.
+//
+// A build that extends an existing index provides the level values every
+// address already has in the database via existing, along with the block id of
+// the base the build extends.  Each group's replay then starts from those
+// levels after stripping any entries beyond the base, which an interrupted
+// write of the same staging may have merged already.  Level values that end up
+// unchanged are not emitted, and a seeded level that no longer exists is
+// emitted with a nil value so the caller deletes it.
+//
+// addrDone is invoked after each address's emissions.  It gives the caller a
+// safe point to commit what has been emitted so far, since committing only part
+// of an address would leave a mix of old and new level values for a resumed
+// build to seed its replay from.
+func emitSortedAddrLevelEntries(records []addrRecord,
+	existing map[[addrKeySize]byte][][]byte, baseBlockID uint32,
+	memBucket *memAddrBucket,
+	emit func(key [levelKeySize]byte, value []byte) error,
+	addrDone func() error, interrupts ...<-chan struct{}) error {
+
+	for j := 0; j < len(records); {
+		if addrBuildInterruptRequested(interrupts...) {
+			return errInterruptRequested
+		}
+
+		// Gather the contiguous run of records for one address key.
+		addrKey := records[j].addrKey
+		k := j
+		for k < len(records) && records[k].addrKey == addrKey {
+			if (k-j)%addrStagingInterruptCheckRecords == 0 &&
+				addrBuildInterruptRequested(interrupts...) {
+
+				return errInterruptRequested
+			}
+			k++
+		}
+
+		existingLevels := existing[addrKey]
+		if len(existingLevels) == 0 {
+			levels, err := buildAddrLevelValuesInterruptible(
+				records[j:k], interrupts...,
+			)
+			if err != nil {
+				return err
+			}
+			for level, value := range levels {
+				levelKey := keyForLevel(addrKey, uint8(level))
+				if err := emit(levelKey, value); err != nil {
+					return err
+				}
+			}
+			if err := addrDone(); err != nil {
+				return err
+			}
+			j = k
+			continue
+		}
+
+		// Seed the replay with the level values the address already has,
+		// counting the entries beyond the base so they can be stripped.
+		memBucket.reset()
+		numStale := 0
+		for level, value := range existingLevels {
+			levelKey := keyForLevel(addrKey, uint8(level))
+			if err := memBucket.Put(levelKey[:], value); err != nil {
+				return err
+			}
+			for off := 0; off+txEntrySize <= len(value); off += txEntrySize {
+				if off%(addrStagingInterruptCheckRecords*txEntrySize) == 0 &&
+					addrBuildInterruptRequested(interrupts...) {
+
+					return errInterruptRequested
+				}
+				if byteOrder.Uint32(value[off:]) > baseBlockID {
+					numStale++
+				}
+			}
+		}
+		if numStale > 0 {
+			err := dbRemoveAddrIndexEntries(memBucket, addrKey, numStale)
+			if err != nil {
+				return err
+			}
+		}
+
+		// Reconstruct the on-disk level layout by replaying the entries in
+		// order through the same routine the incremental path uses.
+		for recordIdx, r := range records[j:k] {
+			if recordIdx%addrStagingInterruptCheckRecords == 0 &&
+				addrBuildInterruptRequested(interrupts...) {
+
+				return errInterruptRequested
+			}
+			txLoc := wire.TxLoc{
+				TxStart: int(r.txStart),
+				TxLen:   int(r.txLen),
+			}
+			err := dbPutAddrIndexEntry(memBucket, addrKey,
+				uint32(r.blockID), txLoc)
+			if err != nil {
+				return err
+			}
+		}
+
+		// Emit the produced level keys in ascending level order.  There are no
+		// gaps, so the first missing level ends the address.  Seeded levels
+		// whose value did not change are already in the database and are
+		// skipped.
+		numLevels := 0
+		for level := uint8(0); ; level++ {
+			levelKey := keyForLevel(addrKey, level)
+			value := memBucket.levels[levelKey]
+			if value == nil {
+				break
+			}
+			numLevels++
+			if int(level) < len(existingLevels) &&
+				bytes.Equal(value, existingLevels[level]) {
+				continue
+			}
+			if err := emit(levelKey, value); err != nil {
+				return err
+			}
+		}
+
+		// Any seeded level beyond the ones produced no longer exists, so emit
+		// a nil value for it to have the caller delete it.
+		for level := numLevels; level < len(existingLevels); level++ {
+			levelKey := keyForLevel(addrKey, uint8(level))
+			if err := emit(levelKey, nil); err != nil {
+				return err
+			}
+		}
+
+		if err := addrDone(); err != nil {
+			return err
+		}
+		j = k
+	}
+	return nil
+}
