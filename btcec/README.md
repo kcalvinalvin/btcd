@@ -17,6 +17,17 @@ Although this package was primarily written for btcd, it has intentionally been
 designed so it can be used as a standalone package for any projects needing to
 use secp256k1 elliptic curve cryptography.
 
+## Verification Backends
+
+On amd64, btcec uses its fast verification and public-key parsing backend by
+default. The following build tags control backend selection:
+
+* `purego` selects the legacy backend unless `fastverify` is also set.
+* `fastverify` selects the fast backend explicitly, including its portable
+  implementation on other architectures or when combined with `purego`.
+* `nofastverify` always selects the legacy backend, including when it is
+  combined with `fastverify`.
+
 ## Installation and Updating
 
 ```bash
@@ -37,4 +48,3 @@ $ go install -u -v github.com/btcsuite/btcd/btcec/v2
 
 Package btcec is licensed under the [copyfree](http://copyfree.org) ISC License
 except for btcec.go and btcec_test.go which is under the same license as Go.
-
