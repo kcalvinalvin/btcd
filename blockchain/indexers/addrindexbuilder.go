@@ -18,12 +18,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/database"
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
 const (
+	// addrIndexBuildDirName is the subdirectory of the data dir that holds the
+	// address index build staging files.
+	addrIndexBuildDirName = "addrindexbuild"
+
 	// addrRecordMaxSize is the address key followed by three maximum-size
 	// uint64 varints.
 	addrRecordMaxSize = addrKeySize + 3*wire.MaxVarIntPayload
@@ -41,6 +46,21 @@ const (
 	// byte is uniformly distributed for hashed address types, so records spread
 	// evenly while every entry for an address remains in the same shard.
 	numAddrStagingShards = 256
+
+	// addrStagingIOBufferSize batches the small staging record reads and writes
+	// while limiting the 256 shard buffers open during a scan to 16 MiB total.
+	addrStagingIOBufferSize = 64 * 1024
+
+	// addrBuildScanChunkSize is the number of contiguous block heights scanned
+	// between durable progress updates.  After each chunk the staged records are
+	// synced and a manifest records the height reached so an interrupted build
+	// resumes from there rather than restarting.
+	addrBuildScanChunkSize = 50000
+
+	// addrBuildDecodedScanMaxWorkers limits the decoded blocks held by scan
+	// workers.  Each decoded block retains both raw bytes and allocated
+	// transaction structures, so cap their memory growth on high-core hosts.
+	addrBuildDecodedScanMaxWorkers = 8
 
 	// addrBuildManifestName is the file in the staging directory that records
 	// scan progress, the block being targeted, and the number of shards written
@@ -333,7 +353,7 @@ func newAddrStager(dir string) (*addrStager, error) {
 		}
 		s.shards[i].path = path
 		s.shards[i].f = f
-		s.shards[i].buf = bufio.NewWriterSize(f, 64*1024)
+		s.shards[i].buf = bufio.NewWriterSize(f, addrStagingIOBufferSize)
 	}
 	return s, nil
 }
@@ -415,7 +435,7 @@ func openAddrStager(dir string, appendRecords bool,
 		s.shards[i].sorted = sorted
 		s.shards[i].numRecords = state.numRecords
 		s.shards[i].f = f
-		s.shards[i].buf = bufio.NewWriterSize(f, 64*1024)
+		s.shards[i].buf = bufio.NewWriterSize(f, addrStagingIOBufferSize)
 	}
 	return s, nil
 }
@@ -552,7 +572,7 @@ func readAddrStagingShardRecords(f *os.File, numRecords int,
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	r := bufio.NewReaderSize(f, 64*1024)
+	r := bufio.NewReaderSize(f, addrStagingIOBufferSize)
 	return readAddrStagingRecords(r, numRecords, interrupts...)
 }
 
@@ -649,7 +669,7 @@ func writeAddrStagingShard(path string, records []addrRecord,
 		}
 	}()
 
-	w := bufio.NewWriterSize(f, 64*1024)
+	w := bufio.NewWriterSize(f, addrStagingIOBufferSize)
 	var varIntBuf [addrVarIntScratchSize]byte
 	for i := range records {
 		if i%addrStagingInterruptCheckRecords == 0 &&
@@ -754,7 +774,7 @@ func mergeAddrStagingRuns(runPaths []string, sortedPath string,
 		runs[i] = runReader{
 			path: path,
 			f:    f,
-			r:    bufio.NewReaderSize(f, 64*1024),
+			r:    bufio.NewReaderSize(f, addrStagingIOBufferSize),
 		}
 		merged = append(merged, addrRecordMergeItem{run: i})
 		item := &merged[len(merged)-1]
@@ -780,7 +800,7 @@ func mergeAddrStagingRuns(runPaths []string, sortedPath string,
 			os.Remove(sortedPath)
 		}
 	}()
-	w := bufio.NewWriterSize(f, 64*1024)
+	w := bufio.NewWriterSize(f, addrStagingIOBufferSize)
 	var writeVarIntBuf [addrVarIntScratchSize]byte
 	var numMerged uint64
 	// Repeatedly write the smallest record, then replace it with the next record
@@ -880,7 +900,7 @@ func sortAddrStagingShard(path, sortedPath string, numRecords,
 		}
 		return os.Rename(path, sortedPath)
 	}
-	r := bufio.NewReaderSize(f, 64*1024)
+	r := bufio.NewReaderSize(f, addrStagingIOBufferSize)
 
 	numRuns := (numRecords + maxRunRecords - 1) / maxRunRecords
 	runPaths := make([]string, 0, numRuns)
@@ -1381,6 +1401,302 @@ func (b *memAddrBucket) Delete(key []byte) error {
 // reset clears the bucket so it can be reused for the next address key.
 func (b *memAddrBucket) reset() {
 	clear(b.levels)
+}
+
+// scanAddrHeightRange scans the block heights in [start, end] with a pool of
+// workers, staging the derived address index records, and increments scanned
+// for every block processed.  Chain reads are safe to do concurrently.
+func (idx *AddrIndex) scanAddrHeightRange(chain *blockchain.BlockChain,
+	stager *addrStager, start, end int32, numWorkers int,
+	scanned *int64, interrupt <-chan struct{}) error {
+
+	heights := make(chan int32, numWorkers*4)
+	var (
+		wg       sync.WaitGroup
+		errOnce  sync.Once
+		firstErr error
+		stop     = make(chan struct{})
+	)
+	fail := func(e error) {
+		errOnce.Do(func() {
+			firstErr = e
+			close(stop)
+		})
+	}
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			data := make(writeIndexData)
+
+			for height := range heights {
+				if addrBuildInterruptRequested(interrupt, stop) {
+					fail(errInterruptRequested)
+					return
+				}
+				clear(data)
+				block, err := chain.BlockByHeight(height)
+				if err != nil {
+					fail(err)
+					return
+				}
+				txLocs, err := block.TxLoc()
+				if err != nil {
+					fail(err)
+					return
+				}
+
+				// The address index maps the outputs created as well as the
+				// outputs spent by a block, so the spend journal is needed to
+				// recover the previous output scripts referenced by the inputs.
+				stxos, err := chain.FetchSpendJournal(block)
+				if err != nil {
+					fail(err)
+					return
+				}
+				idx.indexBlock(data, block, stxos)
+
+				// The block at height h always receives block id h+1 from the
+				// transaction index, which assigns ids sequentially from the
+				// genesis block, so the id is derived here rather than read back
+				// from a transaction index that may not be built yet.
+				blockID := uint32(height + 1)
+
+				for addrKey, txIdxs := range data {
+					for _, txIdx := range txIdxs {
+						err := stager.add(&addrKey, blockID, txLocs[txIdx])
+						if err != nil {
+							fail(err)
+							return
+						}
+					}
+				}
+				atomic.AddInt64(scanned, 1)
+			}
+		}()
+	}
+
+feed:
+	for height := start; height <= end; height++ {
+		select {
+		case <-stop:
+			break feed
+		case <-interrupt:
+			fail(errInterruptRequested)
+			break feed
+		case heights <- height:
+		}
+	}
+	close(heights)
+	wg.Wait()
+	return firstErr
+}
+
+// buildAddrIndexRecords scans every block after the base up to the current
+// best height in parallel, deriving the address index entries for each block
+// and staging them in shards keyed by the address hash160.  The base is the
+// index tip the build extends, height -1 and a zero hash for a build from
+// scratch.  It returns the populated stager, which the caller is responsible
+// for cleaning up, along with the height and hash it scanned to.
+//
+// The scan proceeds in chunks and records its progress after each one, so an
+// interrupted build resumes from the last saved position rather than
+// restarting.  It is meant to run during index initialization, while the chain
+// is quiescent and no blocks are being connected.  Any blocks that arrive after
+// the target height is read are connected by the manager's per-block catchup
+// afterwards.
+func (idx *AddrIndex) buildAddrIndexRecords(chain *blockchain.BlockChain,
+	dataDir string, baseHeight int32, baseHash chainhash.Hash,
+	interrupt <-chan struct{}) (*addrStager, chainhash.Hash, int32, error) {
+
+	// Each worker holds one decoded block while extracting addresses.  Limit the
+	// pool to the available processors and a fixed ceiling to bound worker-local
+	// memory.
+	numWorkers := min(runtime.GOMAXPROCS(0), addrBuildDecodedScanMaxWorkers)
+
+	best := chain.BestSnapshot()
+	targetHeight := best.Height
+	targetHash := best.Hash
+
+	stagingDir := filepath.Join(dataDir, addrIndexBuildDirName, "staging")
+	_, statErr := os.Stat(stagingDir)
+	stagingExisted := statErr == nil
+	if err := os.MkdirAll(stagingDir, 0700); err != nil {
+		return nil, chainhash.Hash{}, 0, err
+	}
+
+	// Resume from a prior manifest if the staging directory holds one for the
+	// same base, otherwise start a fresh scan from the block after the base.
+	// Every staged record, recorded in the manifest or not, comes from an
+	// ancestor of the scan target, so the staging is only reused while that
+	// target is still on the main chain.  A staging directory that cannot be
+	// reopened is discarded as well.
+	var (
+		stager      *addrStager
+		startHeight = baseHeight + 1
+		err         error
+	)
+	manifest, ok := readAddrBuildManifest(stagingDir)
+	if ok {
+		mainChainHash, hashErr := chain.BlockHashByHeight(manifest.targetHeight)
+		switch {
+		case manifest.baseHeight != baseHeight ||
+			!manifest.baseHash.IsEqual(&baseHash):
+
+			log.Warnf("Discarding the interrupted address index scan since " +
+				"it does not extend the current index tip")
+
+		case hashErr != nil || !manifest.targetHash.IsEqual(mainChainHash):
+			log.Warnf("Discarding the interrupted address index scan since " +
+				"the chain it scanned is no longer the main chain")
+
+		default:
+			resumeHeight := manifest.completed + 1
+			stager, err = openAddrStager(stagingDir,
+				resumeHeight <= targetHeight, &manifest, interrupt)
+			if err != nil {
+				if err == errInterruptRequested {
+					return nil, chainhash.Hash{}, 0, err
+				}
+				log.Warnf("Cannot resume address index build (%v), starting over",
+					err)
+				stager = nil
+			} else {
+				startHeight = resumeHeight
+				if resumeHeight <= targetHeight {
+					log.Infof("Resuming address index scan from height %d "+
+						"of %d", startHeight, targetHeight)
+				} else {
+					log.Infof("Resuming address index sort and write with "+
+						"%d/%d shards already written",
+						manifest.writtenShards,
+						numAddrStagingShards)
+				}
+			}
+		}
+	}
+	if stager == nil {
+		if baseHeight == -1 {
+			// Anything an earlier interrupted build already wrote into the
+			// address index bucket cannot be trusted without resumable
+			// staging, since it may belong to a chain that has since been
+			// reorged.  Clear the bucket so the build starts empty.
+			if err := idx.clearAddrIndexBucket(interrupt); err != nil {
+				return nil, chainhash.Hash{}, 0, err
+			}
+		} else if stagingExisted &&
+			(!ok || manifest.completed >= manifest.targetHeight) {
+
+			// The write phase of the discarded build, which only runs once
+			// its scan reaches the target, may have merged entries beyond the
+			// base into the bucket.  Those entries cannot be trusted for the
+			// same reason, so remove them while keeping everything the index
+			// tip covers.
+			err := idx.removeAddrIndexEntriesAboveBlockID(
+				uint32(baseHeight+1), interrupt,
+			)
+			if err != nil {
+				return nil, chainhash.Hash{}, 0, err
+			}
+		}
+
+		// The old staging is the only durable evidence that the cleanup above
+		// must be repeated after a crash.  Persist the cleanup before replacing
+		// it with staging for the new scan.
+		if err := flushAddrIndexDB(idx.db); err != nil {
+			return nil, chainhash.Hash{}, 0, err
+		}
+		if err := os.RemoveAll(stagingDir); err != nil {
+			return nil, chainhash.Hash{}, 0, err
+		}
+		if err := os.MkdirAll(stagingDir, 0700); err != nil {
+			return nil, chainhash.Hash{}, 0, err
+		}
+		stager, err = newAddrStager(stagingDir)
+		if err != nil {
+			return nil, chainhash.Hash{}, 0, err
+		}
+	}
+
+	// The scan already reached the tip on a previous run, so leave the write to
+	// the caller.
+	if startHeight > targetHeight {
+		return stager, targetHash, targetHeight, nil
+	}
+
+	log.Infof("Scanning blocks %d to %d for address index entries "+
+		"using %d workers", startHeight, targetHeight, numWorkers)
+
+	// Log progress periodically off a shared counter the workers advance.
+	scanned := int64(0)
+	totalBlocks := int64(targetHeight) - int64(startHeight) + 1
+	progressDone := make(chan struct{})
+	var progressWg sync.WaitGroup
+	progressWg.Add(1)
+	go func() {
+		defer progressWg.Done()
+		ticker := time.NewTicker(addrBuildProgressInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-progressDone:
+				return
+			case <-ticker.C:
+				n := atomic.LoadInt64(&scanned)
+				log.Infof("Address index scan: %d/%d blocks (%.1f%%)", n,
+					totalBlocks, float64(n)/float64(totalBlocks)*100)
+			}
+		}
+	}()
+
+	// Scan in chunks, recording progress after each so the build can resume.
+	var scanErr error
+	for chunkStart := startHeight; chunkStart <= targetHeight; {
+		chunkEnd := chunkStart + addrBuildScanChunkSize - 1
+		if chunkEnd > targetHeight {
+			chunkEnd = targetHeight
+		}
+
+		scanErr = idx.scanAddrHeightRange(chain, stager, chunkStart, chunkEnd,
+			numWorkers, &scanned, interrupt)
+		if scanErr != nil {
+			break
+		}
+		if scanErr = stager.sync(); scanErr != nil {
+			break
+		}
+		nextManifest := addrBuildManifest{
+			completed:    chunkEnd,
+			baseHeight:   baseHeight,
+			targetHeight: targetHeight,
+			baseHash:     baseHash,
+			targetHash:   targetHash,
+		}
+		scanErr = stager.recordShardStates(&nextManifest)
+		if scanErr != nil {
+			break
+		}
+		scanErr = writeAddrBuildManifest(stagingDir, &nextManifest)
+		if scanErr != nil {
+			break
+		}
+		stager.manifest = &nextManifest
+		log.Debugf("Recorded address index scan progress at height %d", chunkEnd)
+		chunkStart += addrBuildScanChunkSize
+	}
+
+	close(progressDone)
+	progressWg.Wait()
+
+	if scanErr != nil {
+		// Keep the staging directory so the scan can resume, but release the
+		// file handles.
+		stager.closeShards()
+		return nil, chainhash.Hash{}, 0, scanErr
+	}
+
+	return stager, targetHash, targetHeight, nil
 }
 
 // addrLevelEntryCountsInterruptible returns the final number of entries in each
@@ -1890,4 +2206,197 @@ func (idx *AddrIndex) writeAddrIndexToDB(db database.DB, stager *addrStager,
 		}
 	}
 	return writeErr
+}
+
+// clearAddrIndexBucket deletes every entry in the address index bucket.  Since
+// the bucket can be massive, the entries are deleted in multiple database
+// transactions to keep memory usage to reasonable levels.  It is a no-op
+// beyond a single empty transaction when the bucket holds nothing.
+func (idx *AddrIndex) clearAddrIndexBucket(interrupt <-chan struct{}) error {
+	const maxDeletions = 2000000
+	var totalDeleted uint64
+	for numDeleted := maxDeletions; numDeleted == maxDeletions; {
+		if interruptRequested(interrupt) {
+			return errInterruptRequested
+		}
+
+		numDeleted = 0
+		err := idx.db.Update(func(dbTx database.Tx) error {
+			bucket := dbTx.Metadata().Bucket(addrIndexKey)
+			if bucket == nil {
+				return nil
+			}
+			cursor := bucket.Cursor()
+			for ok := cursor.First(); ok; ok = cursor.Next() &&
+				numDeleted < maxDeletions {
+
+				if numDeleted%addrStagingInterruptCheckRecords == 0 &&
+					interruptRequested(interrupt) {
+
+					return errInterruptRequested
+				}
+				if err := cursor.Delete(); err != nil {
+					return err
+				}
+				numDeleted++
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		if numDeleted > 0 {
+			totalDeleted += uint64(numDeleted)
+			log.Infof("Deleted %d stale address index entries (%d total)",
+				numDeleted, totalDeleted)
+		}
+	}
+	return nil
+}
+
+// removeAddrIndexEntriesAboveBlockID removes every entry in the address index
+// bucket that references a block id greater than the one provided.  Entries
+// are appended in block order, so an address's entries beyond the given block
+// id are always its most recent ones and are removed the same way the
+// incremental path removes entries for a disconnected block.  This restores
+// the bucket to exactly what the index tip covers after the write phase of a
+// discarded build merged entries beyond it.
+func (idx *AddrIndex) removeAddrIndexEntriesAboveBlockID(maxBlockID uint32,
+	interrupt <-chan struct{}) error {
+
+	// Collect how many entries beyond the block id every address has.
+	staleCounts := make(map[[addrKeySize]byte]int)
+	var numVisited uint64
+	err := idx.db.View(func(dbTx database.Tx) error {
+		bucket := dbTx.Metadata().Bucket(addrIndexKey)
+		if bucket == nil {
+			return nil
+		}
+		return bucket.ForEach(func(k, v []byte) error {
+			if numVisited%addrStagingInterruptCheckRecords == 0 &&
+				interruptRequested(interrupt) {
+
+				return errInterruptRequested
+			}
+			numVisited++
+			if len(k) != levelKeySize {
+				return nil
+			}
+			numStale := 0
+			for off := 0; off+txEntrySize <= len(v); off += txEntrySize {
+				if off%(addrStagingInterruptCheckRecords*txEntrySize) == 0 &&
+					interruptRequested(interrupt) {
+
+					return errInterruptRequested
+				}
+				if byteOrder.Uint32(v[off:]) > maxBlockID {
+					numStale++
+				}
+			}
+			if numStale > 0 {
+				var addrKey [addrKeySize]byte
+				copy(addrKey[:], k)
+				staleCounts[addrKey] += numStale
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return err
+	}
+	if len(staleCounts) == 0 {
+		return nil
+	}
+
+	log.Infof("Removing stale address index entries beyond the index tip "+
+		"for %d addresses", len(staleCounts))
+
+	addrKeys := make([][addrKeySize]byte, 0, len(staleCounts))
+	for addrKey := range staleCounts {
+		addrKeys = append(addrKeys, addrKey)
+	}
+
+	// Remove the entries in multiple transactions to keep the memory a single
+	// transaction holds to reasonable levels.
+	const addrsPerTx = 4096
+	for start := 0; start < len(addrKeys); start += addrsPerTx {
+		if interruptRequested(interrupt) {
+			return errInterruptRequested
+		}
+
+		end := start + addrsPerTx
+		if end > len(addrKeys) {
+			end = len(addrKeys)
+		}
+		err := idx.db.Update(func(dbTx database.Tx) error {
+			bucket := dbTx.Metadata().Bucket(addrIndexKey)
+			for _, addrKey := range addrKeys[start:end] {
+				err := dbRemoveAddrIndexEntries(bucket, addrKey,
+					staleCounts[addrKey])
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// buildAddrIndexFromChain builds the address index into the address index
+// bucket of the main database on top of its current tip.  A new index has a
+// tip height of -1 and a zero hash.  It returns the height and hash it was
+// built to.
+func (idx *AddrIndex) buildAddrIndexFromChain(chain *blockchain.BlockChain,
+	dataDir string, interrupt <-chan struct{}) (chainhash.Hash, int32, error) {
+
+	var (
+		baseHash   *chainhash.Hash
+		baseHeight int32
+	)
+	err := idx.db.View(func(dbTx database.Tx) error {
+		var err error
+		baseHash, baseHeight, err = dbFetchIndexerTip(dbTx, addrIndexKey)
+		return err
+	})
+	if err != nil {
+		return chainhash.Hash{}, 0, err
+	}
+
+	stager, targetHash, targetHeight, err := idx.buildAddrIndexRecords(
+		chain, dataDir, baseHeight, *baseHash, interrupt,
+	)
+	if err != nil {
+		return chainhash.Hash{}, 0, err
+	}
+
+	log.Infof("Writing address index into the database")
+	err = idx.writeAddrIndexToDB(idx.db, stager, uint32(baseHeight+1),
+		interrupt)
+	if err != nil {
+		// Keep the completed scan staged so a retry skips straight to the write
+		// rather than rescanning.
+		stager.closeShards()
+		return chainhash.Hash{}, 0, err
+	}
+	stager.closeShards()
+
+	log.Infof("Built address index into the database at height %d (%s)",
+		targetHeight, targetHash)
+	return targetHash, targetHeight, nil
+}
+
+// AddrIndexFastBuildStaging returns the directory an address index fast build
+// stages its work in under the given data directory, and whether it currently
+// exists on disk.  An interrupted build keeps its staging so a later run can
+// resume, and only running the build to completion or DropAddrIndex removes
+// it.
+func AddrIndexFastBuildStaging(dataDir string) (string, bool) {
+	dir := filepath.Join(dataDir, addrIndexBuildDirName)
+	_, err := os.Stat(dir)
+	return dir, err == nil
 }
