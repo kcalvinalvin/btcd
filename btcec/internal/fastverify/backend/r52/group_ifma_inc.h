@@ -179,8 +179,7 @@ GLOBL ifmaC8<>(SB), RODATA, $64
 	VPANDQ.Z Z28, zd, K1, zd;   \
 	VALIGNQ $7, Z26, Z13, Z14;  \
 	VPADDQ Z14, zd, K1, zd;     \
-	VPSRLQ $52, zd, Z13;        \
-	VPTESTMQ Z13, Z13, K6;      \
+	VPCMPUQ $6, Z28, zd, K6;   \
 	KORW K6, K7, K7
 
 // REDTAILW is REDTAIL2 for stored coordinates: the limb 4 bits at and
@@ -201,8 +200,7 @@ GLOBL ifmaC8<>(SB), RODATA, $64
 	VPANDQ.Z Z14, zd, K1, zd;   \
 	VALIGNQ $7, Z26, Z13, Z14;  \
 	VPADDQ Z14, zd, K1, zd;     \
-	VPSRLQ $52, zd, Z13;        \
-	VPTESTMQ Z13, Z13, K6;      \
+	VPCMPUQ $6, Z28, zd, K6;   \
 	KORW K6, K7, K7
 
 // PASSF2 carries a loose value zv, lanes below 2^63 with lanes 5..7
@@ -216,8 +214,7 @@ GLOBL ifmaC8<>(SB), RODATA, $64
 	VPANDQ.Z Z28, zv, K1, zv;  \
 	VALIGNQ $7, Z26, Z13, Z14; \
 	VPADDQ Z14, zv, K1, zv;    \
-	VPSRLQ $52, zv, Z13;       \
-	VPTESTMQ Z13, Z13, K6;     \
+	VPCMPUQ $6, Z28, zv, K6;   \
 	KORW K6, K7, K7
 
 // WEAKOUT2 is PASSF2 for stored coordinates, folding the limb 4 bits at
@@ -232,8 +229,7 @@ GLOBL ifmaC8<>(SB), RODATA, $64
 	VPANDQ.Z Z14, zv, K1, zv;  \
 	VALIGNQ $7, Z26, Z13, Z14; \
 	VPADDQ Z14, zv, K1, zv;    \
-	VPSRLQ $52, zv, Z13;       \
-	VPTESTMQ Z13, Z13, K6;     \
+	VPCMPUQ $6, Z28, zv, K6;   \
 	KORW K6, K7, K7
 // The field prime p in weak normalized limbs, for the degenerate check
 // of the mixed addition.
