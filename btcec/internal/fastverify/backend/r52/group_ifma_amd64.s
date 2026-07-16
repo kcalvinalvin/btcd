@@ -173,3 +173,194 @@ bail:
 	MOVQ $1, ret+16(FP)
 	VZEROUPPER
 	RET
+// func jacAddMixedIFMA(p, a *jacobianPoint, b *affinePoint) uint64
+// The madd-2007-bl mixed addition with the IFMA field core. Values V1..V5
+// live in Z16..Z20; Z1, z1z1, hh and yj spill to the frame across their
+// idle spans, and consecutive multiplications by the same operand reuse
+// its lane alignments. The degenerate shared-x case returns nonzero
+// through the same bail path as a carry-pass leftover, leaving the
+// generic fallback to handle doubling and infinity.
+TEXT ·jacAddMixedIFMA(SB), NOSPLIT, $256-32
+	MOVQ a+8(FP), SI
+	MOVQ b+16(FP), BX
+	IFMASETUP
+
+	VMOVDQU64.Z 80(SI), K1, Z16 // Z1
+	VMOVDQU64.Z 0(SI), K1, Z17  // X1
+	VMOVDQU64.Z 40(SI), K1, Z18 // Y1
+	VMOVDQU64 Z16, K1, 0(SP)    // Z1 parks until zh
+
+	// z1z1 = Z1^2
+	BALIGN(Z16)
+	ZEROACC
+	MROWS(Z16, Z16)
+	MERGE
+	REDFOLD(Z19)
+	REDTAIL2(Z19)
+
+	// s2 = Y2*Z1, reusing the Z1 alignments
+	VMOVDQU64.Z 40(BX), K1, Z20
+	ZEROACC
+	MROWS(Z20, Z16)
+	MERGE
+	REDFOLD(Z20)
+	REDTAIL2(Z20)
+
+	// u2 = X2*z1z1
+	BALIGN(Z19)
+	ZEROACC
+	VMOVDQU64.Z 0(BX), K1, Z16
+	MROWS(Z16, Z19)
+	MERGE
+	REDFOLD(Z16)
+	REDTAIL2(Z16)
+
+	// s2 *= z1z1, reusing the z1z1 alignments, then z1z1 parks until Z3
+	ZEROACC
+	MROWS(Z20, Z19)
+	MERGE
+	REDFOLD(Z20)
+	REDTAIL2(Z20)
+	VMOVDQU64 Z19, K1, 64(SP)
+
+	// h = u2 - X1, weak normalized for the shared-x check
+	VMOVDQU64 ifmaC2<>(SB), Z13
+	VPADDQ Z13, Z16, Z16
+	VPSUBQ Z17, Z16, Z16
+	WEAKOUT2(Z16)
+
+	// The points share an x coordinate exactly when h is zero or p.
+	VPTESTMQ Z16, Z16, K6
+	KORTESTW K6, K6
+	JEQ addBail
+	VMOVDQU64 ifmaPrime<>(SB), Z13
+	VPCMPEQQ Z13, Z16, K6
+	KMOVW K6, AX
+	CMPL AX, $0xFF
+	JEQ addBail
+
+	// rr = s2 - Y1, with the doubling of rr deferred into the scalings
+	VMOVDQU64 ifmaC2<>(SB), Z13
+	VPADDQ Z13, Z20, Z20
+	VPSUBQ Z18, Z20, Z20
+	PASSF2(Z20)
+
+	// hh = h^2
+	BALIGN(Z16)
+	ZEROACC
+	MROWS(Z16, Z16)
+	MERGE
+	REDFOLD(Z19)
+	REDTAIL2(Z19)
+
+	// v = 4*X1*hh, absorbing the i = 4*hh scaling
+	BALIGN(Z19)
+	ZEROACC
+	MROWS(Z17, Z19)
+	MERGE
+	VPSLLQ $2, Z8, Z8
+	VPSLLQ $2, Z10, Z10
+	VPSLLQ $2, Z12, Z12
+	REDFOLD(Z17)
+	REDTAIL2(Z17)
+
+	// j = 4*h*hh, reusing the hh alignments, then hh parks until Z3
+	ZEROACC
+	MROWS(Z16, Z19)
+	MERGE
+	VPSLLQ $2, Z8, Z8
+	VPSLLQ $2, Z10, Z10
+	VPSLLQ $2, Z12, Z12
+	VMOVDQU64 Z19, K1, 128(SP)
+	REDFOLD(Z19)
+	REDTAIL2(Z19)
+
+	// zh = Z1 + h
+	VMOVDQU64.Z 0(SP), K1, Z13
+	VPADDQ Z13, Z16, Z16
+	PASSF2(Z16)
+
+	// yj = Y1*j, parked until Y3
+	BALIGN(Z19)
+	ZEROACC
+	MROWS(Z18, Z19)
+	MERGE
+	REDFOLD(Z18)
+	REDTAIL2(Z18)
+	VMOVDQU64 Z18, K1, 192(SP)
+
+	// rr2 = 4*rr^2, the doubled rr squared
+	BALIGN(Z20)
+	ZEROACC
+	MROWS(Z20, Z20)
+	MERGE
+	VPSLLQ $2, Z8, Z8
+	VPSLLQ $2, Z10, Z10
+	VPSLLQ $2, Z12, Z12
+	REDFOLD(Z18)
+	REDTAIL2(Z18)
+
+	// X3 = rr2 - j - 2*v, left loose through the 32*twoP constants
+	VPSLLQ $1, Z17, Z0
+	VMOVDQU64 ifmaC32<>(SB), Z13
+	VPADDQ Z13, Z18, Z14
+	VPSUBQ Z19, Z14, Z19
+	VPSUBQ Z0, Z19, Z19
+
+	// T = v - X3 with the 512*twoP constants covering the loose X3
+	VMOVDQU64 ifmaC512<>(SB), Z13
+	VPADDQ Z13, Z17, Z14
+	VPSUBQ Z19, Z14, Z17
+	PASSF2(Z17)
+
+	// Y3 = 2*(rr*T) rows, with X3 normalizing for the store while the
+	// multiplication reduces
+	BALIGN(Z17)
+	ZEROACC
+	MROWS(Z20, Z17)
+	MERGE
+	VPSLLQ $1, Z8, Z8
+	VPSLLQ $1, Z10, Z10
+	VPSLLQ $1, Z12, Z12
+	WEAKOUT2(Z19)
+	REDFOLD(Z20)
+	REDTAIL2(Z20)
+
+	// Y3 -= 2*yj
+	VMOVDQU64.Z 192(SP), K1, Z14
+	VPSLLQ $1, Z14, Z0
+	VMOVDQU64 ifmaC32<>(SB), Z13
+	VPADDQ Z13, Z20, Z20
+	VPSUBQ Z0, Z20, Z20
+	WEAKOUT2(Z20)
+
+	// Z3 = zh^2 - z1z1 - hh
+	BALIGN(Z16)
+	ZEROACC
+	MROWS(Z16, Z16)
+	MERGE
+	REDFOLD(Z16)
+	REDTAIL2(Z16)
+	VMOVDQU64 ifmaC32<>(SB), Z13
+	VMOVDQU64.Z 64(SP), K1, Z14
+	VMOVDQU64.Z 128(SP), K1, Z15
+	VPADDQ Z13, Z16, Z16
+	VPSUBQ Z14, Z16, Z16
+	VPSUBQ Z15, Z16, Z16
+	WEAKOUT2(Z16)
+
+	KORTESTW K7, K7
+	JNE addBail
+
+	MOVQ p+0(FP), DI
+	VMOVDQU64 Z19, K1, 0(DI)
+	VMOVDQU64 Z20, K1, 40(DI)
+	VMOVDQU64 Z16, K1, 80(DI)
+	MOVQ $0, ret+24(FP)
+	VZEROUPPER
+	RET
+
+addBail:
+	MOVQ $1, ret+24(FP)
+	VZEROUPPER
+	RET

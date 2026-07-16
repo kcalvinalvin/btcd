@@ -235,3 +235,14 @@ GLOBL ifmaC8<>(SB), RODATA, $64
 	VPSRLQ $52, zv, Z13;       \
 	VPTESTMQ Z13, Z13, K6;     \
 	KORW K6, K7, K7
+// The field prime p in weak normalized limbs, for the degenerate check
+// of the mixed addition.
+DATA ifmaPrime<>+0(SB)/8, $0xFFFFEFFFFFC2F
+DATA ifmaPrime<>+8(SB)/8, $0x000FFFFFFFFFFFFF
+DATA ifmaPrime<>+16(SB)/8, $0x000FFFFFFFFFFFFF
+DATA ifmaPrime<>+24(SB)/8, $0x000FFFFFFFFFFFFF
+DATA ifmaPrime<>+32(SB)/8, $0x0000FFFFFFFFFFFF
+DATA ifmaPrime<>+40(SB)/8, $0
+DATA ifmaPrime<>+48(SB)/8, $0
+DATA ifmaPrime<>+56(SB)/8, $0
+GLOBL ifmaPrime<>(SB), RODATA, $64

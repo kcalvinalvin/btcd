@@ -151,3 +151,121 @@ func BenchmarkJacDoubleIFMAIndep2(b *testing.B) {
 		b.Log("sink")
 	}
 }
+
+// TestJacAddMixedIFMAMatchesGeneric verifies the IFMA mixed addition
+// against addMixedGeneric on random points, dependent chains, aliasing,
+// and the degenerate shared-x cases, which must bail rather than write.
+func TestJacAddMixedIFMAMatchesGeneric(t *testing.T) {
+	if !hasIFMA {
+		t.Skip("no AVX-512 IFMA support")
+	}
+
+	for i := 0; i < 20000; i++ {
+		q1 := randomDcrecPoint(t)
+		q2 := randomDcrecPoint(t)
+		jp := fromDcrecJacobian(t, &q1)
+		jq := fromDcrecJacobian(t, &q2)
+		ab := jq.ToAffine()
+
+		var want, got jacobianPoint
+		addMixedGeneric(&want, &jp, &ab)
+		if ret := jacAddMixedIFMA(&got, &jp, &ab); ret != 0 {
+			t.Fatalf("unexpected bail on random pair %d", i)
+		}
+		checkSameValue(t, "X", &got.X, &want.X)
+		checkSameValue(t, "Y", &got.Y, &want.Y)
+		checkSameValue(t, "Z", &got.Z, &want.Z)
+		checkWeak52(t, "X", &got.X)
+		checkWeak52(t, "Y", &got.Y)
+		checkWeak52(t, "Z", &got.Z)
+
+		aliased := jp
+		if ret := jacAddMixedIFMA(&aliased, &aliased, &ab); ret != 0 {
+			t.Fatalf("unexpected bail on aliased pair %d", i)
+		}
+		checkSameValue(t, "aliased X", &aliased.X, &want.X)
+		checkSameValue(t, "aliased Y", &aliased.Y, &want.Y)
+		checkSameValue(t, "aliased Z", &aliased.Z, &want.Z)
+	}
+
+	// A dependent chain akin to the ladder: acc = acc + b each step.
+	q1 := randomDcrecPoint(t)
+	q2 := randomDcrecPoint(t)
+	gen := fromDcrecJacobian(t, &q1)
+	jq := fromDcrecJacobian(t, &q2)
+	ab := jq.ToAffine()
+	ifma := gen
+	for i := 0; i < 50000; i++ {
+		addMixedGeneric(&gen, &gen, &ab)
+		if ret := jacAddMixedIFMA(&ifma, &ifma, &ab); ret != 0 {
+			t.Fatalf("unexpected bail in chain step %d", i)
+		}
+		checkSameValue(t, "chain X", &ifma.X, &gen.X)
+		checkSameValue(t, "chain Y", &ifma.Y, &gen.Y)
+		checkSameValue(t, "chain Z", &ifma.Z, &gen.Z)
+	}
+
+	// Degenerate shared-x cases must bail: doubling (a == b lifted) and
+	// inverses summing to infinity, both with Z1 = 1 and with random Z.
+	for i := 0; i < 200; i++ {
+		q := randomDcrecPoint(t)
+		q.ToAffine()
+		qScaled := rescale(t, &q)
+		qAffine := fromDcrecJacobian(t, &q)
+		ab := affinePoint{X: qAffine.X, Y: qAffine.Y}
+		var sameAffine jacobianPoint
+		sameAffine.SetAffine(&ab)
+		sameScaled := fromDcrecJacobian(t, &qScaled)
+
+		cases := []struct {
+			name  string
+			point jacobianPoint
+		}{
+			{name: "affine", point: sameAffine},
+			{name: "scaled", point: sameScaled},
+		}
+		for _, test := range cases {
+			name, same := test.name, test.point
+			sentinel := fromDcrecJacobian(t, &qScaled)
+			out := sentinel
+			if ret := jacAddMixedIFMA(&out, &same, &ab); ret == 0 {
+				t.Fatalf("missed %s doubling degenerate %d", name, i)
+			}
+			if out != sentinel {
+				t.Fatalf("%s doubling bail wrote output %d", name, i)
+			}
+
+			inverse := same
+			inverse.Y.normalizeWeak()
+			inverse.Y.Negate(1)
+			inverse.Y.normalizeWeak()
+			out = sentinel
+			if ret := jacAddMixedIFMA(&out, &inverse, &ab); ret == 0 {
+				t.Fatalf("missed %s infinity degenerate %d", name, i)
+			}
+			if out != sentinel {
+				t.Fatalf("%s infinity bail wrote output %d", name, i)
+			}
+		}
+	}
+}
+
+func BenchmarkJacAddMixedIFMA(b *testing.B) {
+	if !hasIFMA {
+		b.Skip("no AVX-512 IFMA support")
+	}
+	q1 := randomDcrecPoint(b)
+	q2 := randomDcrecPoint(b)
+	jp := fromDcrecJacobian(b, &q1)
+	jq := fromDcrecJacobian(b, &q2)
+	ab := jq.ToAffine()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if jacAddMixedIFMA(&jp, &jp, &ab) != 0 {
+			b.Fatal("bail")
+		}
+	}
+	if jp.X.n[0] == 0 {
+		b.Log("sink")
+	}
+}
