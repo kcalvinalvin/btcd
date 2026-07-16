@@ -10,6 +10,8 @@ func TestSelectBackends(t *testing.T) {
 	want := backendSelection{
 		ecdsaVerify:   backendR52,
 		schnorrVerify: backendR52,
+		liftX:         backendR52,
+		curveCheck:    backendR52,
 	}
 	if got := selectBackends(); got != want {
 		t.Fatalf("backend selection: got %+v want %+v", got, want)

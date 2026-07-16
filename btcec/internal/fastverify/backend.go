@@ -23,6 +23,8 @@ const (
 type backendSelection struct {
 	ecdsaVerify   backendID
 	schnorrVerify backendID
+	liftX         backendID
+	curveCheck    backendID
 }
 
 var selectedBackends = selectBackends()
@@ -31,6 +33,8 @@ func selectBackends() backendSelection {
 	return backendSelection{
 		ecdsaVerify:   backendR52,
 		schnorrVerify: backendR52,
+		liftX:         backendR52,
+		curveCheck:    backendR52,
 	}
 }
 
@@ -49,5 +53,23 @@ func verifySchnorrEquation(equation *engine.SchnorrEquation) bool {
 		return r52.VerifySchnorr(equation)
 	default:
 		panic("fastverify: unknown Schnorr backend")
+	}
+}
+
+func liftX(x *[32]byte, odd bool) ([32]byte, bool) {
+	switch selectedBackends.liftX {
+	case backendR52:
+		return r52.LiftX(x, odd)
+	default:
+		panic("fastverify: unknown lift-x backend")
+	}
+}
+
+func isOnCurve(x, y *[32]byte) bool {
+	switch selectedBackends.curveCheck {
+	case backendR52:
+		return r52.IsOnCurve(x, y)
+	default:
+		panic("fastverify: unknown curve-check backend")
 	}
 }
