@@ -157,7 +157,7 @@ type trans2x2 struct {
 // starting from eta = -delta, and returns the updated eta and the
 // combined transition matrix. Multi-bit progress comes from cancelling up
 // to eight low bits of g per inner round through the neginv256 table.
-func divsteps62Var(eta int64, f0, g0 uint64) (int64, trans2x2) {
+func divsteps62VarGeneric(eta int64, f0, g0 uint64, t *trans2x2) int64 {
 	var u, v, q, r uint64 = 1, 0, 0, 1
 	f, g := f0, g0
 	i := 62
@@ -192,7 +192,8 @@ func divsteps62Var(eta int64, f0, g0 uint64) (int64, trans2x2) {
 		q += u * w
 		r += v * w
 	}
-	return eta, trans2x2{int64(u), int64(v), int64(q), int64(r)}
+	*t = trans2x2{int64(u), int64(v), int64(q), int64(r)}
+	return eta
 }
 
 // updateDE62 sets (d, e) to the transition matrix times (d, e) divided by
@@ -313,7 +314,7 @@ func (mi *modInfo) invVar(x *signed62) {
 	eta := int64(-1)
 	for {
 		var t trans2x2
-		eta, t = divsteps62Var(eta, uint64(f.v[0]), uint64(g.v[0]))
+		eta = divsteps62Var(eta, uint64(f.v[0]), uint64(g.v[0]), &t)
 		updateDE62(&d, &e, t, mi)
 		updateFG62Var(length, &f, &g, t)
 		if g.v[0] == 0 {
