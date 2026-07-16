@@ -43,6 +43,23 @@ func jacAddMixed(p, a *jacobianPoint, b *affinePoint) {
 	p.Inf = false
 }
 
+// ladderRunIFMA runs a ladder schedule in one assembly call with the
+// accumulator register-resident. It returns nonzero when an operation bails,
+// leaving both points partially updated. The caller must ensure hasIFMA and
+// finite inputs. Defined in group_ifma_ladder_amd64.s.
+//
+//go:noescape
+func ladderRunIFMA(acc, gacc *jacobianPoint, ops []ladderOp) uint64
+
+// runLadder uses the IFMA interpreter when available. A bailout restores both
+// inputs before replaying the complete schedule portably.
 func runLadder(acc, gacc *jacobianPoint, ops []ladderOp) {
+	if hasIFMA && len(ops) > 0 {
+		accSave, gaccSave := *acc, *gacc
+		if ladderRunIFMA(acc, gacc, ops) == 0 {
+			return
+		}
+		*acc, *gacc = accSave, gaccSave
+	}
 	runLadderGeneric(acc, gacc, ops)
 }
