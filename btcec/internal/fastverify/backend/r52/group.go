@@ -205,3 +205,101 @@ func addMixedGeneric(p, a *jacobianPoint, b *affinePoint) {
 
 	p.Inf = false
 }
+
+// Add sets p to a + b for two Jacobian points using the add-2007-bl
+// formulas, costing 11 multiplications and 5 squarings, falling back to
+// Double or infinity in the degenerate cases.
+func (p *jacobianPoint) Add(a, b *jacobianPoint) {
+	if a.Inf {
+		*p = *b
+		return
+	}
+	if b.Inf {
+		*p = *a
+		return
+	}
+
+	var z1z1, z2z2, u1, u2, s1, s2 fe
+	z1z1.Square(&a.Z)
+	z2z2.Square(&b.Z)
+	u1.Mul(&a.X, &z2z2)
+	u2.Mul(&b.X, &z1z1)
+	s1.Mul(&a.Y, &b.Z)
+	s1.Mul(&s1, &z2z2)
+	s2.Mul(&b.Y, &a.Z)
+	s2.Mul(&s2, &z1z1)
+
+	// H = U2 - U1, rr = 2*(S2 - S1).
+	var h, rr fe
+	h = u1
+	h.Negate(1)
+	h.Add(&u2)
+	rr = s1
+	rr.Negate(1)
+	rr.Add(&s2)
+
+	var hz, rz fe
+	hz = h
+	hz.Normalize()
+	if hz.IsZero() {
+		rz = rr
+		rz.Normalize()
+		if rz.IsZero() {
+			p.Double(a)
+			return
+		}
+		p.SetInfinity()
+		return
+	}
+	h.normalizeWeak()
+	rr.normalizeWeak()
+	rr.MulInt(2)
+
+	// I = (2*H)^2, J = H*I, V = U1*I
+	var i, j, v fe
+	i = h
+	i.MulInt(2)
+	i.Square(&i)
+	j.Mul(&h, &i)
+	v.Mul(&u1, &i)
+
+	// X3 = rr^2 - J - 2*V
+	var negJ, twoV fe
+	negJ = j
+	negJ.Negate(1)
+	twoV = v
+	twoV.MulInt(2)
+	twoV.Negate(2)
+	p.X.Square(&rr)
+	p.X.Add(&negJ)
+	p.X.Add(&twoV)
+	p.X.normalizeWeak()
+
+	// Y3 = rr*(V - X3) - 2*S1*J
+	var t, sj fe
+	t = p.X
+	t.Negate(1)
+	t.Add(&v)
+	t.Mul(&t, &rr)
+	sj.Mul(&s1, &j)
+	sj.MulInt(2)
+	sj.Negate(2)
+	p.Y = t
+	p.Y.Add(&sj)
+	p.Y.normalizeWeak()
+
+	// Z3 = ((Z1 + Z2)^2 - Z1Z1 - Z2Z2) * H
+	var zz fe
+	zz = a.Z
+	zz.Add(&b.Z)
+	zz.Square(&zz)
+	z1z1.Negate(1)
+	z2z2.Negate(1)
+	zz.Add(&z1z1)
+	zz.Add(&z2z2)
+	zz.Mul(&zz, &h)
+	p.Z = zz
+	p.Z.normalizeWeak()
+
+	p.Inf = false
+}

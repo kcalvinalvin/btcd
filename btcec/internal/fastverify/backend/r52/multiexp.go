@@ -108,10 +108,36 @@ func addDigit(acc *jacobianPoint, table *[8]affinePoint, digit int8, neg bool) {
 }
 
 // dualBaseMult computes u1*G + u2*Q using the fixed-point table for the G
-// term and a GLV split Strauss wNAF loop for the Q term.
+// term and a GLV split Strauss wNAF loop for the Q term. The G term
+// accumulates on its own chain in the unscaled frame so its additions can be
+// interleaved with the ladder doublings. The two chains combine with one full
+// addition at the end.
 func dualBaseMult(u1, u2 *secp.ModNScalar, q *affinePoint) jacobianPoint {
 	var acc jacobianPoint
 	acc.SetInfinity()
+
+	// G term: base 256 windows over the fixed table, no doublings needed.
+	var gEntries [32]*affinePoint
+	nG := 0
+	if !u1.IsZero() {
+		table := baseTable()
+		b := u1.Bytes()
+		for j := 0; j < 32; j++ {
+			// Window j covers bits 8j..8j+7, byte 31-j in the big
+			// endian encoding.
+			if v := b[31-j]; v != 0 {
+				gEntries[nG] = &table[j][v]
+				nG++
+			}
+		}
+	}
+	var gacc jacobianPoint
+	gacc.SetInfinity()
+	gi := 0
+	if nG > 0 {
+		gacc.SetAffine(gEntries[0])
+		gi = 1
+	}
 
 	// Q term: split u2 and run two width 5 wNAF streams over shared
 	// doublings, using phi to map the table for the lambda half.
@@ -143,7 +169,13 @@ func dualBaseMult(u1, u2 *secp.ModNScalar, q *affinePoint) jacobianPoint {
 			l = l2
 		}
 		for i := l - 1; i >= 0; i-- {
-			acc.Double(&acc)
+			if gi < nG && !acc.Inf && !gacc.Inf {
+				acc.Double(&acc)
+				gacc.AddMixed(&gacc, gEntries[gi])
+				gi++
+			} else {
+				acc.Double(&acc)
+			}
 			if i < l1 && d1[i] != 0 {
 				addDigit(&acc, &qTable, d1[i], n1)
 			}
@@ -160,17 +192,13 @@ func dualBaseMult(u1, u2 *secp.ModNScalar, q *affinePoint) jacobianPoint {
 		}
 	}
 
-	// G term: base 256 windows over the fixed table, no doublings needed.
-	if !u1.IsZero() {
-		table := baseTable()
-		b := u1.Bytes()
-		for j := 0; j < 32; j++ {
-			// Window j covers bits 8j..8j+7, byte 31-j in the big
-			// endian encoding.
-			if v := b[31-j]; v != 0 {
-				acc.AddMixed(&acc, &table[j][v])
-			}
-		}
+	// Drain the G additions the ladder did not consume, then fold the G
+	// chain into the result.
+	for ; gi < nG; gi++ {
+		gacc.AddMixed(&gacc, gEntries[gi])
+	}
+	if nG > 0 {
+		acc.Add(&acc, &gacc)
 	}
 
 	return acc

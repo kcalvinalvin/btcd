@@ -212,3 +212,65 @@ func TestAddMixedMatchesDcrec(t *testing.T) {
 		t.Fatal("infinity + Q must equal Q")
 	}
 }
+
+func TestAddFullMatchesDcrec(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		da := randomDcrecPoint(t)
+		db := randomDcrecPoint(t)
+		if i%2 == 1 {
+			da = rescale(t, &da)
+			db = rescale(t, &db)
+		}
+
+		ma := fromDcrecJacobian(t, &da)
+		mb := fromDcrecJacobian(t, &db)
+
+		var dr secp.JacobianPoint
+		secp.AddNonConst(&da, &db, &dr)
+
+		var mr jacobianPoint
+		mr.Add(&ma, &mb)
+		comparePoints(t, "add", &mr, &dr)
+
+		inPlace := ma
+		inPlace.Add(&inPlace, &mb)
+		comparePoints(t, "add in place a", &inPlace, &dr)
+
+		inPlaceB := mb
+		inPlaceB.Add(&ma, &inPlaceB)
+		comparePoints(t, "add in place b", &inPlaceB, &dr)
+	}
+
+	// Same point under different Z representations hits the doubling
+	// branch.
+	dp := randomDcrecPoint(t)
+	d1 := rescale(t, &dp)
+	d2 := rescale(t, &dp)
+	m1 := fromDcrecJacobian(t, &d1)
+	m2 := fromDcrecJacobian(t, &d2)
+	var want secp.JacobianPoint
+	secp.DoubleNonConst(&dp, &want)
+	var got jacobianPoint
+	got.Add(&m1, &m2)
+	comparePoints(t, "add doubling branch", &got, &want)
+
+	// P + (-P) with different Z representations is infinity.
+	m2neg := m2
+	m2neg.Y.normalizeWeak()
+	m2neg.Y.Negate(1)
+	m2neg.Y.normalizeWeak()
+	var infR jacobianPoint
+	infR.Add(&m1, &m2neg)
+	if !infR.Inf {
+		t.Fatal("P + (-P) must be infinity")
+	}
+
+	// Infinity handling.
+	var inf jacobianPoint
+	inf.SetInfinity()
+	var r jacobianPoint
+	r.Add(&inf, &m1)
+	comparePoints(t, "inf + P", &r, &d1)
+	r.Add(&m1, &inf)
+	comparePoints(t, "P + inf", &r, &d1)
+}
