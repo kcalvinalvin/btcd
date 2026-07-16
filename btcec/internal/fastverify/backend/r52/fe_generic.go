@@ -2,6 +2,8 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
+//go:build !amd64 || purego
+
 package r52
 
 func feMul(r, a, b *fe) {
