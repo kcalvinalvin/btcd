@@ -9,3 +9,8 @@ package modinv
 func divsteps62Var(eta int64, f0, g0 uint64, t *trans2x2) int64 {
 	return divsteps62VarGeneric(eta, f0, g0, t)
 }
+
+func modinvUpdate(d, e, f, g *signed62, t *trans2x2, mi *modInfo, length int) {
+	updateDE62(d, e, *t, mi)
+	updateFG62Var(length, f, g, *t)
+}

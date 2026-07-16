@@ -315,8 +315,7 @@ func (mi *modInfo) invVar(x *signed62) {
 	for {
 		var t trans2x2
 		eta = divsteps62Var(eta, uint64(f.v[0]), uint64(g.v[0]), &t)
-		updateDE62(&d, &e, t, mi)
-		updateFG62Var(length, &f, &g, t)
+		modinvUpdate(&d, &e, &f, &g, &t, mi, length)
 		if g.v[0] == 0 {
 			cond := int64(0)
 			for j := 1; j < length; j++ {

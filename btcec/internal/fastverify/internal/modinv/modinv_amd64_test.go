@@ -114,3 +114,84 @@ func TestDivsteps62VarAsmMatchesGeneric(t *testing.T) {
 		}
 	}
 }
+
+func checkUpdateTrace(t *testing.T, name string, mi *modInfo,
+	input signed62) [6]bool {
+
+	t.Helper()
+	var d, e signed62
+	e.v[0] = 1
+	f, g := mi.modulus, input
+	eta, length := int64(-1), 5
+	var seen [6]bool
+	for round := 0; ; round++ {
+		if round == 32 {
+			t.Fatalf("%s: inversion trace did not terminate", name)
+		}
+		seen[length] = true
+
+		var trans trans2x2
+		eta = divsteps62VarGeneric(
+			eta, uint64(f.v[0]), uint64(g.v[0]), &trans,
+		)
+
+		wantD, wantE := d, e
+		wantF, wantG := f, g
+		updateDE62(&wantD, &wantE, trans, mi)
+		updateFG62Var(length, &wantF, &wantG, trans)
+
+		gotD, gotE := d, e
+		gotF, gotG := f, g
+		gotTrans := trans
+		gotMI := *mi
+		beforeMI := gotMI
+		update62(&gotD, &gotE, &gotF, &gotG, &gotTrans, &gotMI,
+			int64(length))
+		if gotD != wantD || gotE != wantE ||
+			gotF != wantF || gotG != wantG {
+
+			t.Fatalf("%s round %d length %d: update mismatch\n"+
+				"d got=%v want=%v\n"+
+				"e got=%v want=%v\n"+
+				"f got=%v want=%v\n"+
+				"g got=%v want=%v",
+				name, round, length, gotD.v, wantD.v,
+				gotE.v, wantE.v, gotF.v, wantF.v, gotG.v, wantG.v)
+		}
+		if gotTrans != trans || gotMI != beforeMI {
+			t.Fatalf("%s: update62 modified a read-only input", name)
+		}
+
+		d, e, f, g = wantD, wantE, wantF, wantG
+		if modinvTraceDone(&g, length) {
+			return seen
+		}
+		length = shrinkModinvTrace(&f, &g, length)
+	}
+}
+
+func TestUpdate62AsmMatchesGeneric(t *testing.T) {
+	moduli := []struct {
+		name string
+		mi   *modInfo
+	}{
+		{"scalar", &scalarModInfo},
+		{"field", &fieldModInfo},
+	}
+	for _, modulus := range moduli {
+		inputs := modinvParityInputs(modulus.mi)
+		seen := checkUpdateTrace(t, modulus.name+" coverage",
+			modulus.mi, inputs[1])
+		for length := 1; length <= 5; length++ {
+			if !seen[length] {
+				t.Fatalf("%s: length %d was not exercised",
+					modulus.name, length)
+			}
+		}
+
+		for i, input := range inputs {
+			name := fmt.Sprintf("%s input %d", modulus.name, i)
+			checkUpdateTrace(t, name, modulus.mi, input)
+		}
+	}
+}
