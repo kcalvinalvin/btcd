@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/database"
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
@@ -45,6 +46,12 @@ const (
 	// scan progress, the block being targeted, and the number of shards written
 	// to the database.
 	addrBuildManifestName = "manifest"
+
+	// addrBuildWriteBatchBytes is the approximate number of value bytes buffered
+	// before a database transaction is committed during the write phase.  It
+	// bounds the memory a single transaction holds since address index values
+	// vary widely in size.
+	addrBuildWriteBatchBytes = 32 * 1024 * 1024
 
 	// addrBuildSortMemoryBytes is the approximate combined memory limit for
 	// in-memory runs being sorted concurrently.
@@ -231,6 +238,10 @@ func (r *addrRecord) less(o *addrRecord) bool {
 // Unsorted shards end in .tmp.  A completed shard is published with a .sorted
 // suffix only after the sorted contents have been synced.  Recovery recognizes
 // the suffix and skips sorting that shard again.
+//
+// The database writer consumes sorted shards in shard order while the remaining
+// shards continue sorting.  This keeps database writes sequential and bounds
+// replay memory to one shard.
 //
 // Records are appended without a length prefix because every record has one
 // fixed-width address key followed by exactly three self-delimiting wire
@@ -1326,6 +1337,16 @@ type memAddrBucket struct {
 	levels map[[levelKeySize]byte][]byte
 }
 
+// flushAddrIndexDB ensures database writes are durable before recording them in
+// the staging manifest when the database supports an explicit flush.
+func flushAddrIndexDB(db database.DB) error {
+	flusher, ok := db.(database.Flusher)
+	if !ok {
+		return nil
+	}
+	return flusher.Flush()
+}
+
 // Get returns the value associated with the key.
 //
 // This is part of the internalBucket interface.
@@ -1588,4 +1609,285 @@ func emitSortedAddrLevelEntries(records []addrRecord,
 		j = k
 	}
 	return nil
+}
+
+// fetchExistingAddrLevels returns the level values every address appearing in
+// the records already has in the address index bucket, in ascending level
+// order.  Addresses with no levels are absent from the returned map.
+func fetchExistingAddrLevels(db database.DB,
+	records []addrRecord,
+	interrupt <-chan struct{}) (map[[addrKeySize]byte][][]byte, error) {
+
+	addrKeys := make(map[[addrKeySize]byte]struct{})
+	for i := range records {
+		if i%addrStagingInterruptCheckRecords == 0 &&
+			interruptRequested(interrupt) {
+
+			return nil, errInterruptRequested
+		}
+		addrKeys[records[i].addrKey] = struct{}{}
+	}
+
+	existing := make(map[[addrKeySize]byte][][]byte)
+	err := db.View(func(dbTx database.Tx) error {
+		bucket := dbTx.Metadata().Bucket(addrIndexKey)
+		for addrKey := range addrKeys {
+			if interruptRequested(interrupt) {
+				return errInterruptRequested
+			}
+
+			// Levels have no gaps, so the first missing level ends the
+			// address.  The values are copied since they are only valid for
+			// the duration of the transaction.
+			var levels [][]byte
+			for level := uint8(0); ; level++ {
+				levelKey := keyForLevel(addrKey, level)
+				value := bucket.Get(levelKey[:])
+				if value == nil {
+					break
+				}
+				levels = append(levels, append([]byte(nil), value...))
+			}
+			if levels != nil {
+				existing[addrKey] = levels
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return existing, nil
+}
+
+// writeAddrIndexToDB sorts shards concurrently on disk while processing ready
+// shards in order and writing their address index levels in batched
+// transactions.  The ordered replay gives the database mostly ascending keys.
+// It flushes at shard boundaries, marks the completed shard in the manifest,
+// and removes its staging file so a resumed write starts with the remaining
+// suffix.
+// baseBlockID is the block id of the index tip the build extends, or zero for a
+// build from scratch.  A nonzero value merges each address's staged entries
+// into the level values it already has.
+func (idx *AddrIndex) writeAddrIndexToDB(db database.DB, stager *addrStager,
+	baseBlockID uint32, interrupt <-chan struct{}) error {
+
+	shardReady := make([]chan struct{}, numAddrStagingShards)
+	for shard := range shardReady {
+		shardReady[shard] = make(chan struct{})
+	}
+
+	// Combine the caller's interrupt with errors from the writer so the sort
+	// workers always stop and are joined before this function returns.
+	sortInterrupt := make(chan struct{})
+	var cancelSortOnce sync.Once
+	cancelSort := func() {
+		cancelSortOnce.Do(func() {
+			close(sortInterrupt)
+		})
+	}
+	relayDone := make(chan struct{})
+	go func() {
+		select {
+		case <-interrupt:
+			cancelSort()
+		case <-relayDone:
+		}
+	}()
+	defer close(relayDone)
+
+	sortDone := make(chan error, 1)
+	go func() {
+		sortDone <- sortAddrStagingShards(stager, func(shard int) {
+			close(shardReady[shard])
+		}, sortInterrupt)
+	}()
+
+	sortFinished := false
+	waitForShard := func(shard int) error {
+		if interruptRequested(sortInterrupt) {
+			return errInterruptRequested
+		}
+		if sortFinished {
+			<-shardReady[shard]
+			return nil
+		}
+
+		select {
+		case <-sortInterrupt:
+			return errInterruptRequested
+
+		case <-shardReady[shard]:
+			if interruptRequested(sortInterrupt) {
+				return errInterruptRequested
+			}
+			return nil
+
+		case err := <-sortDone:
+			sortFinished = true
+			if err != nil {
+				return err
+			}
+			<-shardReady[shard]
+			return nil
+		}
+	}
+
+	type levelEntry struct {
+		key   [levelKeySize]byte
+		value []byte
+	}
+	batch := make([]levelEntry, 0, 4096)
+	deletes := make([][levelKeySize]byte, 0)
+	var (
+		batchBytes     int
+		currentShard   int
+		lastWriteLog   = time.Now()
+		writtenEntries uint64
+	)
+	if stager.manifest.writtenShards != 0 {
+		log.Infof("Resuming address index write with %d/%d shards already "+
+			"written", stager.manifest.writtenShards,
+			numAddrStagingShards)
+	}
+	flush := func() error {
+		if len(batch) == 0 && len(deletes) == 0 {
+			return nil
+		}
+
+		err := db.Update(func(dbTx database.Tx) error {
+			bucket := dbTx.Metadata().Bucket(addrIndexKey)
+			for j := range batch {
+				err := bucket.Put(batch[j].key[:], batch[j].value)
+				if err != nil {
+					return err
+				}
+			}
+			for j := range deletes {
+				if err := bucket.Delete(deletes[j][:]); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		writtenEntries += uint64(len(batch))
+		if time.Since(lastWriteLog) >= addrBuildProgressInterval {
+			log.Infof("Address index write: processing shard %d/%d "+
+				"(%d level entries written)", currentShard+1,
+				numAddrStagingShards, writtenEntries)
+			lastWriteLog = time.Now()
+		}
+
+		batch = batch[:0]
+		deletes = deletes[:0]
+		batchBytes = 0
+		return nil
+	}
+
+	writeErr := func() error {
+		memBucket := &memAddrBucket{
+			levels: make(map[[levelKeySize]byte][]byte),
+		}
+		for i := range stager.shards {
+			currentShard = i
+			if stager.shards[i].written {
+				continue
+			}
+			if interruptRequested(interrupt) {
+				return errInterruptRequested
+			}
+			if err := waitForShard(i); err != nil {
+				return err
+			}
+
+			f, err := os.Open(stager.shards[i].path)
+			if err != nil {
+				return err
+			}
+			numRecords := int(stager.shards[i].numRecords)
+			if uint64(numRecords) != stager.shards[i].numRecords {
+				f.Close()
+				return fmt.Errorf("address index staging shard is too large")
+			}
+			records, err := readAddrStagingShardRecords(
+				f, numRecords, interrupt,
+			)
+			closeErr := f.Close()
+			if err != nil {
+				return err
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+
+			// When the build extends an existing index, load the level values the
+			// shard's addresses already have so the staged entries merge into
+			// them.  Addresses never span shards, so each shard can be committed
+			// independently.
+			var existing map[[addrKeySize]byte][][]byte
+			if baseBlockID > 0 {
+				existing, err = fetchExistingAddrLevels(
+					db, records, interrupt,
+				)
+				if err != nil {
+					return err
+				}
+			}
+
+			err = emitSortedAddrLevelEntries(records, existing, baseBlockID,
+				memBucket,
+				func(key [levelKeySize]byte, value []byte) error {
+					if value == nil {
+						deletes = append(deletes, key)
+						return nil
+					}
+					batch = append(batch, levelEntry{
+						key:   key,
+						value: value,
+					})
+					batchBytes += len(value) + levelKeySize
+					return nil
+				},
+				func() error {
+					if interruptRequested(interrupt) {
+						return errInterruptRequested
+					}
+					if batchBytes >= addrBuildWriteBatchBytes {
+						return flush()
+					}
+					return nil
+				}, interrupt)
+			if err != nil {
+				return err
+			}
+			if err := flush(); err != nil {
+				return err
+			}
+			if numRecords > 0 {
+				if err := flushAddrIndexDB(db); err != nil {
+					return err
+				}
+			}
+			records = nil
+			if err := stager.markShardWritten(i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}()
+
+	if writeErr != nil {
+		cancelSort()
+	}
+	if !sortFinished {
+		sortErr := <-sortDone
+		if writeErr == nil {
+			writeErr = sortErr
+		}
+	}
+	return writeErr
 }

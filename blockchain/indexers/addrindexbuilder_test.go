@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/database"
+	_ "github.com/btcsuite/btcd/database/ffldb"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -1016,6 +1018,297 @@ func TestSortAddrStagingShardMergeLimit(t *testing.T) {
 		require.Truef(t, sort.IsSorted(addrRecords(records)),
 			"shard %d is not sorted", shard)
 	}
+}
+
+type failAddrWriteDB struct {
+	database.DB
+	failAfter         int
+	successfulUpdates int
+}
+
+func (db *failAddrWriteDB) Update(fn func(database.Tx) error) error {
+	if db.successfulUpdates == db.failAfter {
+		return errInterruptRequested
+	}
+	if err := db.DB.Update(fn); err != nil {
+		return err
+	}
+	db.successfulUpdates++
+	return nil
+}
+
+func (db *failAddrWriteDB) Flush() error {
+	return db.DB.(database.Flusher).Flush()
+}
+
+type failAddrFlushDB struct {
+	database.DB
+	flushes int
+	updates int
+}
+
+func (db *failAddrFlushDB) Flush() error {
+	db.flushes++
+	return errInterruptRequested
+}
+
+func (db *failAddrFlushDB) Update(fn func(database.Tx) error) error {
+	db.updates++
+	return db.DB.Update(fn)
+}
+
+// TestWriteAddrIndexFlushBeforeManifestUpdate ensures a shard remains resumable
+// when the database durability barrier fails, even when a same-process retry
+// observes prior cached values and does not need to emit them again.
+func TestWriteAddrIndexFlushBeforeManifestUpdate(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	db, err := database.Create("ffldb", filepath.Join(dir, "db"), wire.MainNet)
+	require.NoError(t, err, "database.Create")
+	defer db.Close()
+
+	idx := &AddrIndex{db: db}
+	err = db.Update(func(dbTx database.Tx) error {
+		return idx.Create(dbTx)
+	})
+	require.NoError(t, err, "create address index")
+
+	stagingDir := filepath.Join(dir, "staging")
+	err = os.Mkdir(stagingDir, 0700)
+	require.NoError(t, err, "create staging dir")
+	stager, err := newAddrStager(stagingDir)
+	require.NoError(t, err, "newAddrStager")
+	defer stager.closeShards()
+
+	var addrKey [addrKeySize]byte
+	baseLoc := wire.TxLoc{TxStart: 2, TxLen: 3}
+	stagedLoc := wire.TxLoc{TxStart: 4, TxLen: 5}
+	err = db.Update(func(dbTx database.Tx) error {
+		bucket := dbTx.Metadata().Bucket(addrIndexKey)
+		if err := dbPutAddrIndexEntry(bucket, addrKey, 1, baseLoc); err != nil {
+			return err
+		}
+		return dbPutAddrIndexEntry(bucket, addrKey, 2, stagedLoc)
+	})
+	require.NoError(t, err, "populate address index")
+	err = stager.add(&addrKey, 2, stagedLoc)
+	require.NoError(t, err, "stager.add")
+	err = stager.sync()
+	require.NoError(t, err, "stager.sync")
+	manifest := addrBuildManifest{
+		completed:    1,
+		baseHeight:   0,
+		targetHeight: 1,
+	}
+	err = stager.recordShardStates(&manifest)
+	require.NoError(t, err, "recordShardStates")
+	err = writeAddrBuildManifest(stagingDir, &manifest)
+	require.NoError(t, err, "writeAddrBuildManifest")
+	stager.manifest = &manifest
+
+	failingDB := &failAddrFlushDB{DB: db}
+	err = idx.writeAddrIndexToDB(failingDB, stager, 1, nil)
+	require.Same(t, errInterruptRequested, err, "writeAddrIndexToDB")
+	require.Equal(t, 1, failingDB.flushes, "database flushes")
+	require.Zero(t, failingDB.updates, "database updates")
+	savedManifest, ok := readAddrBuildManifest(stagingDir)
+	require.True(t, ok, "manifest after failed flush is invalid")
+	require.Zero(t, savedManifest.writtenShards,
+		"written shards after failed flush")
+	_, err = os.Stat(stager.shards[0].path)
+	require.NoError(t, err, "staging shard removed before database flush")
+}
+
+// TestWriteAddrIndexToDBResume ensures a resumed database write skips shards
+// whose database writes are recorded as complete in the manifest.
+func TestWriteAddrIndexToDBResume(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	db, err := database.Create("ffldb", filepath.Join(dir, "db"),
+		wire.MainNet)
+	require.NoError(t, err, "database.Create")
+	defer db.Close()
+
+	idx := &AddrIndex{db: db}
+	err = db.Update(func(dbTx database.Tx) error {
+		return idx.Create(dbTx)
+	})
+	require.NoError(t, err, "create address index")
+
+	stagingDir := filepath.Join(dir, "staging")
+	err = os.Mkdir(stagingDir, 0700)
+	require.NoError(t, err, "create staging dir")
+	stager, err := newAddrStager(stagingDir)
+	require.NoError(t, err, "newAddrStager")
+	defer func() {
+		stager.closeShards()
+	}()
+
+	manifest := addrBuildManifest{
+		completed:    100,
+		baseHeight:   -1,
+		targetHeight: 100,
+	}
+	reference := &addrIndexBucket{
+		levels: make(map[[levelKeySize]byte][]byte),
+	}
+	for _, shard := range []byte{0, 100, 200} {
+		var addrKey [addrKeySize]byte
+		addrKey[1] = shard
+		addrKey[addrKeySize-1] = shard + 1
+		for i := 0; i < 10; i++ {
+			blockID, txLoc := entryLoc(i)
+			err = dbPutAddrIndexEntry(reference, addrKey, blockID, txLoc)
+			require.NoError(t, err, "dbPutAddrIndexEntry")
+			err = stager.add(&addrKey, blockID, txLoc)
+			require.NoError(t, err, "stager.add")
+		}
+	}
+	err = stager.sync()
+	require.NoError(t, err, "stager.sync")
+	err = stager.recordShardStates(&manifest)
+	require.NoError(t, err, "recordShardStates")
+	err = writeAddrBuildManifest(stagingDir, &manifest)
+	require.NoError(t, err, "writeAddrBuildManifest")
+	stager.manifest = &manifest
+
+	failingDB := &failAddrWriteDB{DB: db, failAfter: 1}
+	err = idx.writeAddrIndexToDB(failingDB, stager, 0, nil)
+	require.Same(t, errInterruptRequested, err, "interrupted write")
+
+	savedManifest, ok := readAddrBuildManifest(stagingDir)
+	require.True(t, ok, "written shard manifest is invalid")
+	require.Equal(t, uint16(100), savedManifest.writtenShards,
+		"written shards")
+	for shard := 0; shard < int(savedManifest.writtenShards); shard++ {
+		path, sortedPath := addrStagingShardPaths(stagingDir, shard)
+		_, err = os.Stat(path)
+		require.Truef(t, os.IsNotExist(err),
+			"written shard %d temporary file remains", shard)
+		_, err = os.Stat(sortedPath)
+		require.Truef(t, os.IsNotExist(err),
+			"written shard %d sorted file remains", shard)
+	}
+
+	stager, err = openAddrStager(stagingDir, false, &savedManifest, nil)
+	require.NoError(t, err, "openAddrStager")
+	stager.manifest = &savedManifest
+	err = idx.writeAddrIndexToDB(db, stager, 0, nil)
+	require.NoError(t, err, "resumed writeAddrIndexToDB")
+
+	savedManifest, ok = readAddrBuildManifest(stagingDir)
+	require.True(t, ok, "completed write manifest is invalid")
+	require.Equal(t, uint16(numAddrStagingShards),
+		savedManifest.writtenShards, "written shards")
+	for shard := 0; shard < numAddrStagingShards; shard++ {
+		path, sortedPath := addrStagingShardPaths(stagingDir, shard)
+		_, err = os.Stat(path)
+		require.Truef(t, os.IsNotExist(err),
+			"temporary shard %d remains", shard)
+		_, err = os.Stat(sortedPath)
+		require.Truef(t, os.IsNotExist(err), "sorted shard %d remains",
+			shard)
+	}
+
+	got := make(map[[levelKeySize]byte][]byte)
+	err = db.View(func(dbTx database.Tx) error {
+		bucket := dbTx.Metadata().Bucket(addrIndexKey)
+		return bucket.ForEach(func(k, v []byte) error {
+			var key [levelKeySize]byte
+			copy(key[:], k)
+			got[key] = append([]byte(nil), v...)
+			return nil
+		})
+	})
+	require.NoError(t, err, "read address index")
+	assertLevelsEqual(t, got, reference.levels)
+}
+
+// TestWriteAddrIndexToDB ensures the parallel presort and sequential replay
+// produce the same database levels as incremental insertion.
+func TestWriteAddrIndexToDB(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	db, err := database.Create("ffldb", filepath.Join(dir, "db"),
+		wire.MainNet)
+	require.NoError(t, err, "database.Create")
+	defer db.Close()
+
+	idx := &AddrIndex{db: db}
+	err = db.Update(func(dbTx database.Tx) error {
+		return idx.Create(dbTx)
+	})
+	require.NoError(t, err, "create address index")
+
+	stagingDir := filepath.Join(dir, "staging")
+	err = os.Mkdir(stagingDir, 0700)
+	require.NoError(t, err, "create staging dir")
+	stager, err := newAddrStager(stagingDir)
+	require.NoError(t, err, "newAddrStager")
+	defer stager.closeShards()
+
+	var addrKeys [3][addrKeySize]byte
+	for i := range addrKeys {
+		addrKeys[i][0] = byte(i)
+		addrKeys[i][1] = byte(i * 100)
+		addrKeys[i][addrKeySize-1] = byte(i + 1)
+	}
+	reference := &addrIndexBucket{
+		levels: make(map[[levelKeySize]byte][]byte),
+	}
+	var records []addrRecord
+	for _, addrKey := range addrKeys {
+		for i := 0; i < 100; i++ {
+			blockID, txLoc := entryLoc(i)
+			err = dbPutAddrIndexEntry(reference, addrKey, blockID, txLoc)
+			require.NoError(t, err, "dbPutAddrIndexEntry")
+			records = append(records, addrRecord{
+				addrKey: addrKey,
+				blockID: uint64(blockID),
+				txStart: uint64(txLoc.TxStart),
+				txLen:   uint64(txLoc.TxLen),
+			})
+		}
+	}
+
+	for i := len(records) - 1; i >= 0; i-- {
+		record := &records[i]
+		err := stager.add(&record.addrKey, uint32(record.blockID), wire.TxLoc{
+			TxStart: int(record.txStart),
+			TxLen:   int(record.txLen),
+		})
+		require.NoError(t, err, "stager.add")
+	}
+	err = stager.sync()
+	require.NoError(t, err, "stager.sync")
+	manifest := addrBuildManifest{
+		completed:    0,
+		baseHeight:   -1,
+		targetHeight: 0,
+	}
+	err = stager.recordShardStates(&manifest)
+	require.NoError(t, err, "recordShardStates")
+	err = writeAddrBuildManifest(stagingDir, &manifest)
+	require.NoError(t, err, "writeAddrBuildManifest")
+	stager.manifest = &manifest
+	err = idx.writeAddrIndexToDB(db, stager, 0, nil)
+	require.NoError(t, err, "writeAddrIndexToDB")
+
+	got := make(map[[levelKeySize]byte][]byte)
+	err = db.View(func(dbTx database.Tx) error {
+		bucket := dbTx.Metadata().Bucket(addrIndexKey)
+		return bucket.ForEach(func(k, v []byte) error {
+			var key [levelKeySize]byte
+			copy(key[:], k)
+			got[key] = append([]byte(nil), v...)
+			return nil
+		})
+	})
+	require.NoError(t, err, "read address index")
+	assertLevelsEqual(t, got, reference.levels)
 }
 
 // TestAddrBuildManifestRoundTrip ensures the build manifest round trips all of
