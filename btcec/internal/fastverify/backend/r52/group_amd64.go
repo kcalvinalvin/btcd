@@ -63,3 +63,22 @@ func runLadder(acc, gacc *jacobianPoint, ops []ladderOp) {
 	}
 	runLadderGeneric(acc, gacc, ops)
 }
+
+// oddChainIFMA fills table entries 1..7 with chained additions of twoQ in
+// one register-resident call. Nonzero means redo the chain op by op. Defined
+// in group_ifma_ladder_amd64.s.
+//
+//go:noescape
+func oddChainIFMA(table *[8]jacobianPoint, twoQ *affinePoint) uint64
+
+func oddChain(table *[8]jacobianPoint, twoQ *affinePoint) {
+	if hasIFMA && oddChainIFMA(table, twoQ) == 0 {
+		for i := 1; i < 8; i++ {
+			table[i].Inf = false
+		}
+		return
+	}
+	for i := 1; i < 8; i++ {
+		table[i].AddMixed(&table[i-1], twoQ)
+	}
+}

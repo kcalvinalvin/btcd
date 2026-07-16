@@ -45,9 +45,7 @@ func oddMultiples(q *affinePoint, table *[8]jacobianPoint) fe {
 	table[0].Y.normalizeWeak()
 	table[0].Z.SetUint64(1)
 	table[0].Inf = false
-	for i := 1; i < 8; i++ {
-		table[i].AddMixed(&table[i-1], &twoQAff)
-	}
+	oddChain(table, &twoQAff)
 	return twoQ.Z
 }
 

@@ -110,3 +110,51 @@ func TestRunLadderReplaysAfterIFMABail(t *testing.T) {
 	comparePoints(t, "replayed accumulator", &gotAcc, &wantAcc)
 	comparePoints(t, "replayed G accumulator", &gotG, &wantG)
 }
+
+func oddChainTestInputs(t testing.TB, multiple uint32) (
+	[8]jacobianPoint, affinePoint) {
+
+	t.Helper()
+	q := ladderTestAffine(t, multiple)
+	var one, twoQ jacobianPoint
+	one.SetAffine(&q)
+	twoQ.Double(&one)
+	twoQAff := affinePoint{X: twoQ.X, Y: twoQ.Y}
+
+	var table [8]jacobianPoint
+	var zd2, zd3 fe
+	zd2.Square(&twoQ.Z)
+	zd3.Mul(&zd2, &twoQ.Z)
+	table[0].X.Mul(&q.X, &zd2)
+	table[0].X.normalizeWeak()
+	table[0].Y.Mul(&q.Y, &zd3)
+	table[0].Y.normalizeWeak()
+	table[0].Z.SetUint64(1)
+	return table, twoQAff
+}
+
+func TestOddChainIFMAMatchesGeneric(t *testing.T) {
+	if !hasIFMA {
+		t.Skip("no AVX-512 IFMA support")
+	}
+
+	for multiple := uint32(1); multiple <= 64; multiple++ {
+		table, twoQ := oddChainTestInputs(t, multiple)
+		want := table
+		for i := 1; i < 8; i++ {
+			addMixedGeneric(&want[i], &want[i-1], &twoQ)
+		}
+
+		got := table
+		if ret := oddChainIFMA(&got, &twoQ); ret != 0 {
+			t.Fatalf("multiple %d: unexpected assembly bailout", multiple)
+		}
+		for i := range got {
+			name := fmt.Sprintf("multiple %d entry %d", multiple, i)
+			checkLadderPoint(t, name, &got[i], &want[i])
+			checkWeak52(t, name+" X", &got[i].X)
+			checkWeak52(t, name+" Y", &got[i].Y)
+			checkWeak52(t, name+" Z", &got[i].Z)
+		}
+	}
+}

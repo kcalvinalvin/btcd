@@ -17,3 +17,9 @@ func jacAddMixed(p, a *jacobianPoint, b *affinePoint) {
 func runLadder(acc, gacc *jacobianPoint, ops []ladderOp) {
 	runLadderGeneric(acc, gacc, ops)
 }
+
+func oddChain(table *[8]jacobianPoint, twoQ *affinePoint) {
+	for i := 1; i < 8; i++ {
+		table[i].AddMixed(&table[i-1], twoQ)
+	}
+}
