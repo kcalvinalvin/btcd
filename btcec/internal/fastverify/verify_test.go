@@ -15,6 +15,8 @@ import (
 	dcrecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 )
 
+var benchSinkAffine engine.Affine
+
 func randomScalar(t testing.TB) secp.ModNScalar {
 	t.Helper()
 	var raw [32]byte
@@ -40,6 +42,17 @@ func TestAffineFromPubKey(t *testing.T) {
 
 			t.Fatalf("iteration %d: coordinate mismatch", i)
 		}
+	}
+
+	priv, err := secp.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := priv.PubKey()
+	if allocs := testing.AllocsPerRun(1000, func() {
+		benchSinkAffine = affineFromPubKey(pub)
+	}); allocs != 0 {
+		t.Fatalf("affineFromPubKey allocated: got %.2f want 0", allocs)
 	}
 }
 
@@ -297,6 +310,43 @@ func TestVerifySchnorrEngine(t *testing.T) {
 		if VerifySchnorr(&rx, &sBad, &e, priv.PubKey()) {
 			t.Fatalf("corrupted schnorr s accepted, iteration %d", i)
 		}
+	}
+}
+
+func TestVerifyAllocations(t *testing.T) {
+	priv, err := secp.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := priv.PubKey()
+	var hash [32]byte
+	if _, err := rand.Read(hash[:]); err != nil {
+		t.Fatal(err)
+	}
+	sig := dcrecdsa.Sign(priv, hash[:])
+	r, ecdsaS := sig.R(), sig.S()
+	if !VerifyECDSA(&r, &ecdsaS, hash[:], pub) {
+		t.Fatal("valid ECDSA signature rejected during setup")
+	}
+	if allocs := testing.AllocsPerRun(100, func() {
+		benchSinkBool = VerifyECDSA(&r, &ecdsaS, hash[:], pub)
+	}); allocs != 0 {
+		t.Fatalf("VerifyECDSA allocated: got %.2f want 0", allocs)
+	}
+
+	var msg [32]byte
+	if _, err := rand.Read(msg[:]); err != nil {
+		t.Fatal(err)
+	}
+	rx, schnorrS, px := signSchnorr(t, priv, msg)
+	e := schnorrChallenge(&rx, &px, msg[:])
+	if !VerifySchnorr(&rx, &schnorrS, &e, pub) {
+		t.Fatal("valid Schnorr signature rejected during setup")
+	}
+	if allocs := testing.AllocsPerRun(100, func() {
+		benchSinkBool = VerifySchnorr(&rx, &schnorrS, &e, pub)
+	}); allocs != 0 {
+		t.Fatalf("VerifySchnorr allocated: got %.2f want 0", allocs)
 	}
 }
 

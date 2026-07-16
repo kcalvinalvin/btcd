@@ -34,10 +34,11 @@ var (
 // affineFromPubKey returns the canonical coordinates of a parsed public key.
 // Parsed public keys are always finite points on the curve.
 func affineFromPubKey(pub *secp.PublicKey) engine.Affine {
-	serialized := pub.SerializeUncompressed()
+	var p secp.JacobianPoint
+	pub.AsJacobian(&p)
 	var a engine.Affine
-	copy(a.X[:], serialized[1:33])
-	copy(a.Y[:], serialized[33:65])
+	p.X.PutBytes(&a.X)
+	p.Y.PutBytes(&a.Y)
 	return a
 }
 
