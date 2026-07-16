@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
@@ -31,11 +32,20 @@ const (
 	// separately, then reuses the buffer for the eight-byte payload.
 	addrVarIntScratchSize = wire.MaxVarIntPayload - 1
 
+	// addrBuildManifestVersion is the version of the address build manifest.
+	addrBuildManifestVersion = 1
+
 	// numAddrStagingShards is the number of shards used to stage records during
 	// a build.  The first byte of the address hash160 selects the shard.  That
 	// byte is uniformly distributed for hashed address types, so records spread
 	// evenly while every entry for an address remains in the same shard.
 	numAddrStagingShards = 256
+
+	// addrBuildManifestName is the file in the staging directory that records
+	// scan progress, the block being targeted, and the number of shards written
+	// to the database.
+	addrBuildManifestName = "manifest"
+
 	// addrBuildSortMemoryBytes is the approximate combined memory limit for
 	// in-memory runs being sorted concurrently.
 	addrBuildSortMemoryBytes = 256 * 1024 * 1024
@@ -59,6 +69,9 @@ const (
 	// between interrupt checks during long-running staging operations.
 	addrStagingInterruptCheckRecords = 65536
 )
+
+// addrBuildManifestMagic identifies a serialized address index build manifest.
+var addrBuildManifestMagic = [4]byte{'a', 'd', 'r', 'b'}
 
 // addrBuildInterruptRequested returns whether any of the provided interrupt
 // channels has been closed.
@@ -216,11 +229,16 @@ func (r *addrRecord) less(o *addrRecord) bool {
 // records in memory.
 //
 // Unsorted shards end in .tmp.  A completed shard is published with a .sorted
-// suffix only after the sorted contents have been synced.
+// suffix only after the sorted contents have been synced.  Recovery recognizes
+// the suffix and skips sorting that shard again.
 //
 // Records are appended without a length prefix because every record has one
 // fixed-width address key followed by exactly three self-delimiting wire
 // varints.
+//
+// The build manifest records the exact durable record count and byte size for
+// each shard.  Recovery restores that prefix without reparsing the file and
+// discards any records beyond the prefix stored in the manifest.
 //
 // The serialized format is:
 //
@@ -241,6 +259,10 @@ func (r *addrRecord) less(o *addrRecord) bool {
 type addrStagingShard struct {
 	// mu protects buf, rec, varIntBuf, and numRecords during concurrent appends.
 	mu sync.Mutex
+
+	// written is true when the shard was committed to the database and its
+	// progress was recorded in the manifest.
+	written bool
 
 	// f is the shard's backing file.
 	f *os.File
@@ -271,8 +293,12 @@ type addrStagingShard struct {
 // Routing by the first hash160 byte keeps each address in one shard and permits
 // concurrent appends and independent sorting.
 type addrStager struct {
-	// dir contains the staging shard files.
+	// dir contains the staging shard and manifest files.
 	dir string
+
+	// manifest is the latest durable build state.  It is nil until the first
+	// manifest is written.
+	manifest *addrBuildManifest
 
 	// shards holds the independently locked staging files.
 	shards [numAddrStagingShards]addrStagingShard
@@ -299,6 +325,155 @@ func newAddrStager(dir string) (*addrStager, error) {
 		s.shards[i].buf = bufio.NewWriterSize(f, 64*1024)
 	}
 	return s, nil
+}
+
+// openAddrStager reopens the staging shards of an interrupted build for
+// appending or writing.  When appendRecords is true, sorted shards are renamed
+// to unsorted shards because appending new records invalidates their order.
+// Shards already committed according to manifest no longer need files.  Each
+// remaining shard is restored to the record count and byte size in the
+// manifest.
+func openAddrStager(dir string, appendRecords bool,
+	manifest *addrBuildManifest,
+	interrupt <-chan struct{}) (*addrStager, error) {
+
+	writtenShards := manifest.writtenShards
+	if writtenShards > numAddrStagingShards {
+		return nil, fmt.Errorf("invalid number of written address staging shards")
+	}
+	if appendRecords && writtenShards != 0 {
+		return nil, fmt.Errorf("address staging write began before scan completed")
+	}
+
+	numShards := numAddrStagingShards - int(writtenShards)
+	if numShards > 0 {
+		log.Infof("Restoring %d address index staging shards from the "+
+			"build manifest", numShards)
+	}
+
+	s := &addrStager{
+		dir:      dir,
+		manifest: manifest,
+	}
+	for i := range s.shards {
+		if interruptRequested(interrupt) {
+			s.closeShards()
+			return nil, errInterruptRequested
+		}
+
+		path, sortedPath := addrStagingShardPaths(dir, i)
+		if i < int(writtenShards) {
+			s.shards[i].written = true
+			continue
+		}
+
+		_, err := os.Stat(sortedPath)
+		sorted := err == nil
+		if err != nil && !os.IsNotExist(err) {
+			s.closeShards()
+			return nil, err
+		}
+		if sorted {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				s.closeShards()
+				return nil, err
+			}
+			if appendRecords {
+				if err := os.Rename(sortedPath, path); err != nil {
+					s.closeShards()
+					return nil, err
+				}
+				sorted = false
+			} else {
+				path = sortedPath
+			}
+		}
+
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0666)
+		if err != nil {
+			s.closeShards()
+			return nil, err
+		}
+		state := manifest.shards[i]
+		if err := restoreAddrStagingShard(f, i, appendRecords, state); err != nil {
+			f.Close()
+			s.closeShards()
+			return nil, err
+		}
+		s.shards[i].path = path
+		s.shards[i].sorted = sorted
+		s.shards[i].numRecords = state.numRecords
+		s.shards[i].f = f
+		s.shards[i].buf = bufio.NewWriterSize(f, 64*1024)
+	}
+	return s, nil
+}
+
+// restoreAddrStagingShard restores a shard to the state recorded in the
+// manifest without parsing its records.  Appending resumes at the exact durable
+// byte offset, while the sort and write phases require the recorded file size
+// to be unchanged.
+func restoreAddrStagingShard(f *os.File, shard int, appendRecords bool,
+	state addrBuildShardState) error {
+
+	const maxFileSize = uint64(1<<63 - 1)
+	if state.fileSize > maxFileSize {
+		return fmt.Errorf("address staging shard %d is too large", shard)
+	}
+	expectedSize := int64(state.fileSize)
+	stat, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if appendRecords {
+		if stat.Size() < expectedSize {
+			return fmt.Errorf("address staging shard %d is shorter "+
+				"than the size recorded in the manifest", shard)
+		}
+		if stat.Size() != expectedSize {
+			if err := f.Truncate(expectedSize); err != nil {
+				return err
+			}
+		}
+	} else if stat.Size() != expectedSize {
+		return fmt.Errorf("address staging shard %d size does not "+
+			"match the size recorded in the manifest", shard)
+	}
+	return nil
+}
+
+// sync flushes and fsyncs every shard so the records written so far are durable
+// before a manifest referring to them is written.
+func (s *addrStager) sync() error {
+	for i := range s.shards {
+		if err := s.shards[i].buf.Flush(); err != nil {
+			return err
+		}
+		if err := s.shards[i].f.Sync(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// recordShardStates records the durable record count and file size for every
+// shard.  The caller must sync the shards before writing the manifest.
+func (s *addrStager) recordShardStates(manifest *addrBuildManifest) error {
+	for i := range s.shards {
+		sh := &s.shards[i]
+		if sh.written {
+			continue
+		}
+		info, err := os.Stat(sh.path)
+		if err != nil {
+			return err
+		}
+		manifest.shards[i] = addrBuildShardState{
+			numRecords: sh.numRecords,
+			fileSize:   uint64(info.Size()),
+		}
+	}
+	return nil
 }
 
 // add appends an address index entry to the shard for its address key.
@@ -328,6 +503,33 @@ func (s *addrStager) closeShards() {
 			s.shards[i].buf = nil
 		}
 	}
+}
+
+// markShardWritten records that shard and every shard before it were committed
+// to the database, then removes its staging file.  A failed manifest update
+// leaves the file intact so a resumed write safely replays it.
+func (s *addrStager) markShardWritten(shard int) error {
+	if shard != int(s.manifest.writtenShards) {
+		return fmt.Errorf("address staging shards were written out of order")
+	}
+
+	manifest := *s.manifest
+	manifest.writtenShards++
+	if err := writeAddrBuildManifest(s.dir, &manifest); err != nil {
+		return err
+	}
+	s.manifest = &manifest
+
+	sh := &s.shards[shard]
+	sh.written = true
+	path := sh.path
+	sh.path = ""
+	sh.numRecords = 0
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Warnf("Unable to remove written address staging shard %d: %v",
+			shard, err)
+	}
+	return nil
 }
 
 // readAddrStagingShardRecords seeks to the beginning of a staging shard file
@@ -465,7 +667,8 @@ func writeAddrStagingShard(path string, records []addrRecord,
 }
 
 // publishSortedAddrStagingShard publishes synced sort output before removing
-// its source.
+// its source.  If replacement is interrupted, the .sorted file is authoritative
+// when both files exist.
 func publishSortedAddrStagingShard(path, sortingPath, sortedPath string) error {
 	if err := os.Remove(sortedPath); err != nil && !os.IsNotExist(err) {
 		return err
@@ -790,6 +993,7 @@ func sortAddrStagingShards(stager *addrStager,
 		unsortedShards []int
 		totalRecords   uint64
 		physicalBytes  int64
+		writtenShards  int
 		sortedShards   uint32
 		sortedRecords  uint64
 	)
@@ -797,6 +1001,10 @@ func sortAddrStagingShards(stager *addrStager,
 	// attempt already published instead of scheduling them again.
 	for shard := range stager.shards {
 		sh := &stager.shards[shard]
+		if sh.written {
+			writtenShards++
+			continue
+		}
 		info, err := os.Stat(sh.path)
 		if err != nil {
 			return err
@@ -813,16 +1021,18 @@ func sortAddrStagingShards(stager *addrStager,
 		unsortedShards = append(unsortedShards, shard)
 	}
 	logAddrStagingSize("Address index staging", totalRecords, physicalBytes)
+
+	numSortShards := numAddrStagingShards - writtenShards
 	remainingShards := len(unsortedShards)
 	if remainingShards == 0 {
-		log.Infof("Address index sort: %d/%d shards (100.0%%, %d "+
-			"records)", numAddrStagingShards, numAddrStagingShards,
+		log.Infof("Address index sort: %d/%d remaining shards "+
+			"(100.0%%, %d records)", numSortShards, numSortShards,
 			totalRecords)
 		return nil
 	}
 	if sortedShards > 0 {
-		log.Infof("Address index sort: %d/%d shards "+
-			"already sorted", sortedShards, numAddrStagingShards)
+		log.Infof("Resuming address index sort with %d/%d remaining "+
+			"shards already sorted", sortedShards, numSortShards)
 	}
 
 	numWorkers := min(runtime.NumCPU(), addrBuildSortMaxWorkers,
@@ -860,14 +1070,14 @@ func sortAddrStagingShards(stager *addrStager,
 				shards := atomic.LoadUint32(&sortedShards)
 				records := atomic.LoadUint64(&sortedRecords)
 				percent := float64(shards) /
-					float64(numAddrStagingShards) * 100
+					float64(numSortShards) * 100
 				if totalRecords > 0 {
 					percent = float64(records) /
 						float64(totalRecords) * 100
 				}
-				log.Infof("Address index sort: %d/%d shards "+
+				log.Infof("Address index sort: %d/%d remaining shards "+
 					"(%.1f%%, %d/%d records)", shards,
-					numAddrStagingShards, percent, records,
+					numSortShards, percent, records,
 					totalRecords)
 			}
 		}
@@ -934,8 +1144,8 @@ feed:
 	close(shards)
 	wg.Wait()
 	if firstErr == nil {
-		log.Infof("Address index sort: %d/%d shards (100.0%%, %d "+
-			"records)", numAddrStagingShards, numAddrStagingShards,
+		log.Infof("Address index sort: %d/%d remaining shards "+
+			"(100.0%%, %d records)", numSortShards, numSortShards,
 			totalRecords)
 	}
 	return firstErr
@@ -957,6 +1167,156 @@ func syncAddrBuildDir(path string) error {
 		return err
 	}
 	return dir.Close()
+}
+
+// addrBuildShardState identifies the durable prefix of one staging shard.
+type addrBuildShardState struct {
+	// numRecords is the number of complete records in the durable prefix.
+	numRecords uint64
+
+	// fileSize is the byte offset immediately after the durable prefix.
+	fileSize uint64
+}
+
+// addrBuildManifest is the durable recovery state for an address index build.
+type addrBuildManifest struct {
+	// completed is the highest block height whose records were synced to the
+	// shard files.  A resumed scan starts at the following height.
+	completed int32
+
+	// baseHeight is the address index tip height this build extends.  It is -1
+	// when building a new index from scratch.
+	baseHeight int32
+
+	// targetHeight is the chain height the scan was working toward when this
+	// state was recorded.
+	targetHeight int32
+
+	// writtenShards is the number of consecutive shards, starting at zero,
+	// whose database writes completed.  A resumed write starts with the next
+	// shard.
+	writtenShards uint16
+
+	// baseHash identifies the block at baseHeight and is zero for a new index.
+	// It prevents staging built from a different index tip from being reused.
+	baseHash chainhash.Hash
+
+	// targetHash identifies the block at targetHeight.  It prevents staging
+	// for a target that is no longer on the main chain from being reused.
+	targetHash chainhash.Hash
+
+	// shards identifies the exact durable prefix of every staging shard.  It
+	// avoids reparsing the files during recovery and discards complete records
+	// written after the scan position stored in the manifest.
+	shards [numAddrStagingShards]addrBuildShardState
+}
+
+const (
+	// addrBuildManifestHeaderSize is the size of the fixed manifest fields.
+	addrBuildManifestHeaderSize = 19 + 2*chainhash.HashSize
+
+	// addrBuildManifestSize is the serialized size of a build manifest.  The
+	// 19-byte prefix consists of the 4-byte magic, 1-byte version, three 4-byte
+	// heights, and a 2-byte written shard count, followed by two block hashes
+	// and a 16-byte record count and file size for each of the 256 shards.
+	addrBuildManifestSize = addrBuildManifestHeaderSize +
+		numAddrStagingShards*16
+)
+
+// writeAddrBuildManifest atomically records the provided build state in the
+// staging directory.
+func writeAddrBuildManifest(stagingDir string,
+	manifest *addrBuildManifest) error {
+	buf := make([]byte, addrBuildManifestSize)
+	copy(buf[0:4], addrBuildManifestMagic[:])
+	buf[4] = addrBuildManifestVersion
+	byteOrder.PutUint32(buf[5:9], uint32(manifest.completed))
+	byteOrder.PutUint32(buf[9:13], uint32(manifest.baseHeight))
+	byteOrder.PutUint32(buf[13:17], uint32(manifest.targetHeight))
+	byteOrder.PutUint16(buf[17:19], manifest.writtenShards)
+	copy(buf[19:19+chainhash.HashSize], manifest.baseHash[:])
+	targetHashOffset := 19 + chainhash.HashSize
+	copy(buf[targetHashOffset:targetHashOffset+chainhash.HashSize],
+		manifest.targetHash[:])
+
+	offset := addrBuildManifestHeaderSize
+	for i := range manifest.shards {
+		state := &manifest.shards[i]
+		byteOrder.PutUint64(buf[offset:offset+8], state.numRecords)
+		byteOrder.PutUint64(buf[offset+8:offset+16], state.fileSize)
+		offset += 16
+	}
+
+	tmpPath := filepath.Join(stagingDir, addrBuildManifestName+".tmp")
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(buf); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	manifestPath := filepath.Join(stagingDir, addrBuildManifestName)
+	if err := os.Rename(tmpPath, manifestPath); err != nil {
+		return err
+	}
+	return syncAddrBuildDir(stagingDir)
+}
+
+// readAddrBuildManifest returns the build state recorded in the staging
+// directory and whether a valid manifest was present.
+func readAddrBuildManifest(stagingDir string) (addrBuildManifest, bool) {
+	var manifest addrBuildManifest
+	data, err := os.ReadFile(filepath.Join(stagingDir, addrBuildManifestName))
+	if err != nil || len(data) != addrBuildManifestSize {
+		return manifest, false
+	}
+	if !bytes.Equal(data[0:4], addrBuildManifestMagic[:]) ||
+		data[4] != addrBuildManifestVersion {
+		return manifest, false
+	}
+
+	manifest.completed = int32(byteOrder.Uint32(data[5:9]))
+	manifest.baseHeight = int32(byteOrder.Uint32(data[9:13]))
+	manifest.targetHeight = int32(byteOrder.Uint32(data[13:17]))
+	manifest.writtenShards = byteOrder.Uint16(data[17:19])
+	if manifest.writtenShards > numAddrStagingShards ||
+		(manifest.writtenShards != 0 &&
+			manifest.completed < manifest.targetHeight) {
+
+		return addrBuildManifest{}, false
+	}
+	const hashOffset = 19
+	copy(manifest.baseHash[:], data[hashOffset:hashOffset+chainhash.HashSize])
+	targetHashOffset := hashOffset + chainhash.HashSize
+	copy(manifest.targetHash[:],
+		data[targetHashOffset:targetHashOffset+chainhash.HashSize])
+
+	offset := addrBuildManifestHeaderSize
+	for i := range manifest.shards {
+		state := &manifest.shards[i]
+		state.numRecords = byteOrder.Uint64(data[offset : offset+8])
+		state.fileSize = byteOrder.Uint64(data[offset+8 : offset+16])
+		offset += 16
+
+		const minRecordSize = uint64(addrKeySize + 3)
+		const maxFileSize = uint64(1<<63 - 1)
+		if state.fileSize > maxFileSize ||
+			(state.numRecords == 0) != (state.fileSize == 0) ||
+			state.numRecords > state.fileSize/minRecordSize ||
+			state.fileSize > state.numRecords*addrRecordMaxSize {
+
+			return addrBuildManifest{}, false
+		}
+	}
+	return manifest, true
 }
 
 // memAddrBucket is an in-memory internalBucket used to replay one address

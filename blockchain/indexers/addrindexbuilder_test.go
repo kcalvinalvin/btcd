@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -636,6 +637,163 @@ func TestSortAddrStagingShards(t *testing.T) {
 	}
 }
 
+// TestOpenAddrStagerInterrupt ensures staging recovery honors an interrupt and
+// leaves the staged records intact for the next attempt.
+func TestOpenAddrStagerInterrupt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stager, err := newAddrStager(dir)
+	require.NoError(t, err)
+	t.Cleanup(stager.closeShards)
+
+	var addrKey [addrKeySize]byte
+	addrKey[1] = 7
+	err = stager.add(&addrKey, 1, wire.TxLoc{
+		TxStart: 2,
+		TxLen:   3,
+	})
+	require.NoError(t, err)
+	err = stager.sync()
+	require.NoError(t, err)
+	manifest := addrBuildManifest{
+		completed:    0,
+		baseHeight:   -1,
+		targetHeight: 1,
+	}
+	err = stager.recordShardStates(&manifest)
+	require.NoError(t, err)
+	stager.closeShards()
+
+	interrupt := make(chan struct{})
+	close(interrupt)
+	_, err = openAddrStager(dir, true, &manifest, interrupt)
+	require.Same(t, errInterruptRequested, err)
+
+	path, _ := addrStagingShardPaths(dir, int(addrKey[1]))
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	records, err := readAddrStagingShardRecords(f, 1)
+	f.Close()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+}
+
+// TestOpenAddrStagerRecoveryState ensures recovery restores the exact shard
+// prefix recorded in the manifest.
+func TestOpenAddrStagerRecoveryState(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stager, err := newAddrStager(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stager.closeShards()
+	})
+
+	var addrKey [addrKeySize]byte
+	addrKey[1] = 7
+	err = stager.add(&addrKey, 1, wire.TxLoc{
+		TxStart: 2,
+		TxLen:   3,
+	})
+	require.NoError(t, err)
+	err = stager.sync()
+	require.NoError(t, err)
+	manifest := addrBuildManifest{
+		completed:    100,
+		baseHeight:   -1,
+		targetHeight: 200,
+	}
+	err = stager.recordShardStates(&manifest)
+	require.NoError(t, err)
+	wantSize := manifest.shards[addrKey[1]].fileSize
+
+	err = stager.add(&addrKey, 2, wire.TxLoc{
+		TxStart: 4,
+		TxLen:   5,
+	})
+	require.NoError(t, err)
+	err = stager.sync()
+	require.NoError(t, err)
+	stager.closeShards()
+
+	stager, err = openAddrStager(dir, true, &manifest, nil)
+	require.NoError(t, err)
+	shard := &stager.shards[addrKey[1]]
+	require.Equal(t, uint64(1), shard.numRecords)
+	info, err := os.Stat(shard.path)
+	require.NoError(t, err)
+	require.Equal(t, wantSize, uint64(info.Size()))
+
+	f, err := os.Open(shard.path)
+	require.NoError(t, err)
+	records, err := readAddrStagingShardRecords(f, 1)
+	f.Close()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, uint64(1), records[0].blockID)
+}
+
+// TestSortAddrStagingShardsResume ensures shards published as sorted are
+// skipped when an interrupted sort resumes.
+func TestSortAddrStagingShardsResume(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stager, err := newAddrStager(dir)
+	require.NoError(t, err, "newAddrStager")
+	t.Cleanup(func() {
+		stager.closeShards()
+	})
+
+	for i := 0; i < 100; i++ {
+		var key [addrKeySize]byte
+		key[1] = byte(i % 2)
+		key[addrKeySize-1] = byte(100 - i)
+		err := stager.add(&key, uint32(100-i), wire.TxLoc{
+			TxStart: i * 7,
+			TxLen:   i + 1,
+		})
+		require.NoError(t, err, "stager.add")
+	}
+	err = stager.sync()
+	require.NoError(t, err, "stager.sync")
+	manifest := addrBuildManifest{
+		completed:    1,
+		baseHeight:   -1,
+		targetHeight: 1,
+	}
+	err = stager.recordShardStates(&manifest)
+	require.NoError(t, err, "recordShardStates")
+	stager.closeShards()
+
+	unsortedPath, sortedPath := addrStagingShardPaths(dir, 0)
+	numRecords := int(stager.shards[0].numRecords)
+	limiter := newAddrMergeFileLimiter(addrBuildSortMaxMergeFiles)
+	err = sortAddrStagingShard(unsortedPath, sortedPath, numRecords, 7,
+		limiter)
+	require.NoError(t, err, "sortAddrStagingShard")
+
+	resumed, err := openAddrStager(dir, false, &manifest, nil)
+	require.NoError(t, err, "openAddrStager")
+	stager = resumed
+
+	// A nonempty temporary directory makes sorting shard zero fail if it is
+	// queued again.  A successful resume therefore proves the .sorted name
+	// was honored.
+	trapPath := unsortedPath + ".sorting"
+	err = os.Mkdir(trapPath, 0700)
+	require.NoError(t, err, "create sort trap")
+	trapFile := filepath.Join(trapPath, "keep")
+	err = os.WriteFile(trapFile, nil, 0600)
+	require.NoError(t, err, "populate sort trap")
+	err = sortAddrStagingShards(stager, func(int) {}, nil)
+	require.NoError(t, err, "resumed sortAddrStagingShards")
+	_, err = os.Stat(trapFile)
+	require.NoError(t, err, "sorted shard was processed again")
+}
+
 // TestSortAddrStagingShardsReportsReady ensures a completed shard is reported
 // before the overall parallel sort returns.
 func TestSortAddrStagingShardsReportsReady(t *testing.T) {
@@ -679,6 +837,49 @@ func TestSortAddrStagingShardsReportsReady(t *testing.T) {
 		require.NoError(t, err, "sortAddrStagingShards")
 	case <-time.After(5 * time.Second):
 		require.FailNow(t, "sort did not finish")
+	}
+}
+
+// TestOpenAddrStagerForAppend ensures resuming a scan invalidates completed
+// shard sorts before new records are appended.
+func TestOpenAddrStagerForAppend(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stager, err := newAddrStager(dir)
+	require.NoError(t, err, "newAddrStager")
+	t.Cleanup(func() {
+		stager.closeShards()
+	})
+
+	var key [addrKeySize]byte
+	key[1] = 10
+	err = stager.add(&key, 1, wire.TxLoc{TxStart: 2, TxLen: 3})
+	require.NoError(t, err, "stager.add")
+	err = stager.sync()
+	require.NoError(t, err, "stager.sync")
+	manifest := addrBuildManifest{
+		completed:    0,
+		baseHeight:   -1,
+		targetHeight: 1,
+	}
+	err = stager.recordShardStates(&manifest)
+	require.NoError(t, err, "recordShardStates")
+	err = sortAddrStagingShards(stager, func(int) {}, nil)
+	require.NoError(t, err, "sortAddrStagingShards")
+
+	reopened, err := openAddrStager(dir, true, &manifest, nil)
+	require.NoError(t, err, "openAddrStager")
+	stager = reopened
+	for shard := range stager.shards {
+		unsortedPath, sortedPath := addrStagingShardPaths(dir, shard)
+		require.Falsef(t, stager.shards[shard].sorted,
+			"shard %d still marked sorted", shard)
+		require.Equalf(t, unsortedPath, stager.shards[shard].path,
+			"path for shard %d", shard)
+		_, err := os.Stat(sortedPath)
+		require.Truef(t, os.IsNotExist(err), "sorted shard %q remains",
+			sortedPath)
 	}
 }
 
@@ -814,5 +1015,109 @@ func TestSortAddrStagingShardMergeLimit(t *testing.T) {
 		require.NoError(t, err, "read sorted shard")
 		require.Truef(t, sort.IsSorted(addrRecords(records)),
 			"shard %d is not sorted", shard)
+	}
+}
+
+// TestAddrBuildManifestRoundTrip ensures the build manifest round trips all of
+// its fields, and that invalid manifests are rejected.
+func TestAddrBuildManifestRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	manifest := addrBuildManifest{
+		completed:     200000,
+		baseHeight:    100000,
+		targetHeight:  200000,
+		writtenShards: 123,
+	}
+	manifest.shards[0] = addrBuildShardState{
+		numRecords: 123,
+		fileSize:   3000,
+	}
+	manifest.shards[numAddrStagingShards-1] = addrBuildShardState{
+		numRecords: 1,
+		fileSize:   addrKeySize + 3,
+	}
+	for i := range manifest.baseHash {
+		manifest.baseHash[i] = byte(i)
+		manifest.targetHash[i] = byte(255 - i)
+	}
+
+	fromScratch := manifest
+	fromScratch.baseHeight = -1
+	fromScratch.baseHash = chainhash.Hash{}
+	tooManyWritten := manifest
+	tooManyWritten.writtenShards = numAddrStagingShards + 1
+
+	tests := []struct {
+		name          string
+		manifest      addrBuildManifest
+		writeManifest bool
+		mutate        func([]byte) []byte
+		wantValid     bool
+	}{
+		{
+			name:          "existing base",
+			manifest:      manifest,
+			writeManifest: true,
+			wantValid:     true,
+		},
+		{
+			name:          "from scratch",
+			manifest:      fromScratch,
+			writeManifest: true,
+			wantValid:     true,
+		},
+		{
+			name:      "missing",
+			wantValid: false,
+		},
+		{
+			name:          "truncated",
+			manifest:      manifest,
+			writeManifest: true,
+			mutate: func(data []byte) []byte {
+				return data[:len(data)-1]
+			},
+			wantValid: false,
+		},
+		{
+			name:          "wrong magic",
+			manifest:      manifest,
+			writeManifest: true,
+			mutate: func(data []byte) []byte {
+				data[0] ^= 0xff
+				return data
+			},
+			wantValid: false,
+		},
+		{
+			name:          "too many written shards",
+			manifest:      tooManyWritten,
+			writeManifest: true,
+			wantValid:     false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if test.writeManifest {
+				err := writeAddrBuildManifest(dir, &test.manifest)
+				require.NoError(t, err, "writeAddrBuildManifest")
+			}
+
+			if test.mutate != nil {
+				path := filepath.Join(dir, addrBuildManifestName)
+				data, err := os.ReadFile(path)
+				require.NoError(t, err, "read manifest")
+				err = os.WriteFile(path, test.mutate(data), 0600)
+				require.NoError(t, err, "mutate manifest")
+			}
+
+			got, ok := readAddrBuildManifest(dir)
+			require.Equal(t, test.wantValid, ok, "manifest validity")
+			if ok {
+				require.Equal(t, test.manifest, got, "manifest")
+			}
+		})
 	}
 }
