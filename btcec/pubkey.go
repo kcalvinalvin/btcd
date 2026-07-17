@@ -30,13 +30,6 @@ func IsCompressedPubKey(pubKey []byte) bool {
 		(pubKey[0]&^byte(0x1) == pubkeyCompressed)
 }
 
-// ParsePubKey parses a public key for a koblitz curve from a bytestring into a
-// ecdsa.Publickey, verifying that it is valid. It supports compressed,
-// uncompressed and hybrid signature formats.
-func ParsePubKey(pubKeyStr []byte) (*PublicKey, error) {
-	return secp.ParsePubKey(pubKeyStr)
-}
-
 // PublicKey is an ecdsa.PublicKey with additional functions to
 // serialize in uncompressed, compressed, and hybrid formats.
 type PublicKey = secp.PublicKey

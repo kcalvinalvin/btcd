@@ -226,8 +226,7 @@ func schnorrVerify(sig *Signature, hash []byte, pubKeyBytes []byte) error {
 // Verify returns whether or not the signature is valid for the provided hash
 // and secp256k1 public key.
 func (sig *Signature) Verify(hash []byte, pubKey *btcec.PublicKey) bool {
-	pubkeyBytes := SerializePubKey(pubKey)
-	return schnorrVerify(sig, hash, pubkeyBytes) == nil
+	return verifySchnorr(sig, hash, pubKey)
 }
 
 // zeroArray zeroes the memory of a scalar array.

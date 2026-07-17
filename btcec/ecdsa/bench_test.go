@@ -91,14 +91,14 @@ func BenchmarkSigVerify(b *testing.B) {
 		hexToModNScalar("d47563f52aac6b04b55de236b7c515eb9311757db01e02cff079c3ca6efb063f"),
 	)
 
-	if !sig.Verify(msgHash.Bytes(), pubKey) {
+	if !Verify(sig, msgHash.Bytes(), pubKey) {
 		b.Errorf("Signature failed to verify")
 		return
 	}
 	b.StartTimer()
 
 	for i := 0; i < b.N; i++ {
-		sig.Verify(msgHash.Bytes(), pubKey)
+		Verify(sig, msgHash.Bytes(), pubKey)
 	}
 }
 
