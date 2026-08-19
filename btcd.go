@@ -65,6 +65,16 @@ func btcdMain(serverChan chan<- *server) error {
 	// Show version at startup.
 	btcdLog.Infof("Version %s", version())
 
+	// Make sure the certificate pair for the electrum server exists so it
+	// is ready whenever the electrum server is enabled.
+	if !fileExists(cfg.ElectrumKey) && !fileExists(cfg.ElectrumCert) {
+		if err := genElectrumCertPair(cfg.ElectrumCert, cfg.ElectrumKey); err != nil {
+			btcdLog.Errorf("Unable to generate the certificate pair "+
+				"for the electrum server: %v", err)
+			return err
+		}
+	}
+
 	// Enable http profiling server if requested.
 	if cfg.Profile != "" {
 		go func() {
@@ -145,6 +155,14 @@ func btcdMain(serverChan chan<- *server) error {
 	//
 	// NOTE: The order is important here because dropping the tx index also
 	// drops the address index since it relies on it.
+	if cfg.DropScriptHashIndex {
+		if err := indexers.DropScriptHashIndex(db, cfg.DataDir, interrupt); err != nil {
+			btcdLog.Errorf("%v", err)
+			return err
+		}
+
+		return nil
+	}
 	if cfg.DropAddrIndex {
 		if err := indexers.DropAddrIndex(db, interrupt); err != nil {
 			btcdLog.Errorf("%v", err)
@@ -199,6 +217,14 @@ func btcdMain(serverChan chan<- *server) error {
 		err = fmt.Errorf("--addrindex cannot be enabled as the node has been "+
 			"previously pruned. You must delete the files in the datadir: \"%s\" "+
 			"and sync from the beginning to enable the desired index", cfg.DataDir)
+		btcdLog.Errorf("%v", err)
+		return err
+	}
+	if beenPruned && cfg.ScriptHashIndex {
+		err = fmt.Errorf("--scripthashindex cannot be enabled as the node has "+
+			"been previously pruned. You must delete the files in the datadir: "+
+			"\"%s\" and sync from the beginning to enable the desired index",
+			cfg.DataDir)
 		btcdLog.Errorf("%v", err)
 		return err
 	}

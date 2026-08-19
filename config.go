@@ -47,6 +47,8 @@ const (
 	defaultBanDuration           = time.Hour * 24
 	defaultBanThreshold          = 100
 	defaultConnectTimeout        = time.Second * 30
+	defaultElectrumServerPort    = "50001"
+	defaultTLSElectrumServerPort = "50002"
 	defaultMaxRPCClients         = 10
 	defaultMaxRPCWebsockets      = 25
 	defaultMaxRPCConcurrentReqs  = 20
@@ -69,6 +71,7 @@ const (
 	sampleConfigFilename         = "sample-btcd.conf"
 	defaultTxIndex               = false
 	defaultAddrIndex             = false
+	defaultScriptHashIndex       = false
 	pruneMinSize                 = 1536
 )
 
@@ -80,6 +83,9 @@ var (
 	defaultRPCKeyFile  = filepath.Join(defaultHomeDir, "rpc.key")
 	defaultRPCCertFile = filepath.Join(defaultHomeDir, "rpc.cert")
 	defaultLogDir      = filepath.Join(defaultHomeDir, defaultLogDirname)
+
+	defaultElectrumKeyFile  = filepath.Join(defaultHomeDir, "electrum.key")
+	defaultElectrumCertFile = filepath.Join(defaultHomeDir, "electrum.cert")
 )
 
 // runServiceCommand is only set to a real function on Windows.  It is used
@@ -122,6 +128,7 @@ type config struct {
 	DebugLevel           string        `short:"d" long:"debuglevel" description:"Logging level for all subsystems {trace, debug, info, warn, error, critical} -- You may also specify <subsystem>=<level>,<subsystem2>=<level>,... to set the log level for individual subsystems -- Use show to list available subsystems"`
 	DropAddrIndex        bool          `long:"dropaddrindex" description:"Deletes the address-based transaction index from the database on start up and then exits."`
 	DropCfIndex          bool          `long:"dropcfindex" description:"Deletes the index used for committed filtering (CF) support from the database on start up and then exits."`
+	DropScriptHashIndex  bool          `long:"dropscripthashindex" description:"Deletes the script hash to address index from the database on start up and then exits."`
 	DropTxIndex          bool          `long:"droptxindex" description:"Deletes the hash-based transaction index from the database on start up and then exits."`
 	ExternalIPs          []string      `long:"externalip" description:"Add an ip to the list of local addresses we claim to listen on to peers"`
 	Generate             bool          `long:"generate" description:"Generate (mine) bitcoins using the CPU"`
@@ -167,6 +174,7 @@ type config struct {
 	RPCQuirks            bool          `long:"rpcquirks" description:"Mirror some JSON-RPC quirks of Bitcoin Core -- NOTE: Discouraged unless interoperability issues need to be worked around"`
 	RPCPass              string        `short:"P" long:"rpcpass" default-mask:"-" description:"Password for RPC connections"`
 	RPCUser              string        `short:"u" long:"rpcuser" description:"Username for RPC connections"`
+	ScriptHashIndex      bool          `long:"scripthashindex" description:"Maintain a full electrum compatible script hash to address index which makes the electrum server available"`
 	SigCacheMaxSize      uint          `long:"sigcachemaxsize" description:"The maximum number of entries in the signature verification cache"`
 	SimNet               bool          `long:"simnet" description:"Use the simulation test network"`
 	SigNet               bool          `long:"signet" description:"Use the signet test network"`
@@ -183,6 +191,12 @@ type config struct {
 	Upnp                 bool          `long:"upnp" description:"Use UPnP to map our listening port outside of NAT"`
 	ShowVersion          bool          `short:"V" long:"version" description:"Display version information and exit"`
 	Whitelists           []string      `long:"whitelist" description:"Add an IP network or IP that will not be banned. (eg. 192.168.1.0/24 or ::1)"`
+	// Electrum server options.
+	ElectrumListeners    []string `long:"electrumlisteners" description:"Interface/port for the electrum server to listen to. (default 50001)."`
+	TLSElectrumListeners []string `long:"tlselectrumlisteners" description:"Interface/port for the electrum server to listen to with tls. (default 50002)."`
+	EnableElectrum       bool     `long:"enableelectrum" description:"Enable the electrum server."`
+	ElectrumCert         string   `long:"electrumcert" description:"File containing the certificate for the electrum server"`
+	ElectrumKey          string   `long:"electrumkey" description:"File containing the certificate key for the electrum server"`
 	lookup               func(string) ([]net.IP, error)
 	oniondial            func(string, string, time.Duration) (net.Conn, error)
 	dial                 func(string, string, time.Duration) (net.Conn, error)
@@ -402,6 +416,43 @@ func newConfigParser(cfg *config, so *serviceOptions, options flags.Options) *fl
 	return parser
 }
 
+// configureElectrum resolves the script hash index and electrum server options.
+// The electrum server is backed by the script hash index, so enabling the
+// server turns the index on implicitly. It fills in and normalizes the default
+// electrum listen addresses, and reports incompatible flag combinations.
+func (cfg *config) configureElectrum() error {
+	// The electrum server is backed by the script hash index, which in turn
+	// requires the address and transaction indexes. Enable the script hash
+	// index so the server has the indexes it depends on.
+	if cfg.EnableElectrum {
+		cfg.ScriptHashIndex = true
+	}
+
+	if cfg.ScriptHashIndex && cfg.DropScriptHashIndex {
+		return fmt.Errorf("the --scripthashindex and --dropscripthashindex " +
+			"options may not be activated at the same time")
+	}
+
+	if cfg.EnableElectrum && len(cfg.ElectrumListeners) == 0 {
+		cfg.ElectrumListeners = []string{
+			net.JoinHostPort("", defaultElectrumServerPort),
+		}
+	}
+
+	if cfg.EnableElectrum && len(cfg.TLSElectrumListeners) == 0 {
+		cfg.TLSElectrumListeners = []string{
+			net.JoinHostPort("", defaultTLSElectrumServerPort),
+		}
+	}
+
+	cfg.ElectrumListeners = normalizeAddresses(
+		cfg.ElectrumListeners, defaultElectrumServerPort)
+	cfg.TLSElectrumListeners = normalizeAddresses(
+		cfg.TLSElectrumListeners, defaultTLSElectrumServerPort)
+
+	return nil
+}
+
 // loadConfig initializes and parses the config using a config file and command
 // line options.
 //
@@ -430,6 +481,8 @@ func loadConfig() (*config, []string, error) {
 		DbType:               defaultDbType,
 		RPCKey:               defaultRPCKeyFile,
 		RPCCert:              defaultRPCCertFile,
+		ElectrumKey:          defaultElectrumKeyFile,
+		ElectrumCert:         defaultElectrumCertFile,
 		MinRelayTxFee:        mempool.DefaultMinRelayTxFee.ToBTC(),
 		FreeTxRelayLimit:     defaultFreeTxRelayLimit,
 		TrickleInterval:      defaultTrickleInterval,
@@ -444,6 +497,7 @@ func loadConfig() (*config, []string, error) {
 		Generate:             defaultGenerate,
 		TxIndex:              defaultTxIndex,
 		AddrIndex:            defaultAddrIndex,
+		ScriptHashIndex:      defaultScriptHashIndex,
 		V2Transport:          false,
 	}
 
@@ -929,6 +983,13 @@ func loadConfig() (*config, []string, error) {
 			"because the address index relies on the transaction "+
 			"index",
 			funcName)
+		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, usageMessage)
+		return nil, nil, err
+	}
+
+	if err := cfg.configureElectrum(); err != nil {
+		err := fmt.Errorf("%s: %v", funcName, err)
 		fmt.Fprintln(os.Stderr, err)
 		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err

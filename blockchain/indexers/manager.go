@@ -248,6 +248,19 @@ func (m *Manager) Init(chain *blockchain.BlockChain, interrupt <-chan struct{}) 
 		return err
 	}
 
+	// Drop the script hash index when the format version on disk is not
+	// the one this code reads and writes.  The index is then recreated
+	// empty below and caught back up like a newly enabled index.
+	for _, indexer := range m.enabledIndexes {
+		if _, ok := indexer.(*ScriptHashIndex); !ok {
+			continue
+		}
+		if err := maybeDropStaleScriptHashIndex(m.db, interrupt); err != nil {
+			return err
+		}
+		break
+	}
+
 	// Create the initial state for the indexes as needed.
 	err := m.db.Update(func(dbTx database.Tx) error {
 		// Create the bucket for the current tips as needed.
@@ -387,6 +400,42 @@ func (m *Manager) Init(chain *blockchain.BlockChain, interrupt <-chan struct{}) 
 	})
 	if err != nil {
 		return err
+	}
+
+	// Bulk-build any index that supports a fast build and has no data yet,
+	// then treat it as caught up so the per-block catchup loop below skips it.
+	// A fast build reconstructs the whole index from the chain, so it is only
+	// worthwhile for an index with nothing to reuse.
+	for i, indexer := range m.enabledIndexes {
+		builder, ok := indexer.(FastBuilder)
+		if !ok || indexerHeights[i] != -1 {
+			continue
+		}
+		if err := builder.FastBuild(chain, interrupt); err != nil {
+			return err
+		}
+
+		// Reflect the tip the fast build persisted rather than assuming it
+		// reached bestHeight.  The per-block loop below then connects any
+		// blocks that arrived after the build read its target height.
+		var height int32
+		err = m.db.View(func(dbTx database.Tx) error {
+			_, height, err = dbFetchIndexerTip(dbTx, indexer.Key())
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		indexerHeights[i] = height
+	}
+
+	// Recompute the lowest height since a fast build may have advanced one or
+	// more indexes to the best chain tip.
+	lowestHeight = bestHeight
+	for _, height := range indexerHeights {
+		if height < lowestHeight {
+			lowestHeight = height
+		}
 	}
 
 	// Nothing to index if all of the indexes are caught up.
