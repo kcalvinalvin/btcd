@@ -1,0 +1,439 @@
+// Copyright (c) 2026 The btcsuite developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+//go:build amd64 && !purego
+
+#include "textflag.h"
+
+// The functions below are direct translations of mulGeneric and
+// squareGeneric and compute bit-identical limb values. See field.go for
+// the derivation of the column and fold structure. Layout used by both:
+//
+//	R8-R12  a0..a4
+//	SI, BX  input pointers
+//	R13     52-bit mask
+//	R15:R14 the 128-bit column accumulator (lo:hi) in the high phase
+//	DI:CX   the 128-bit fold accumulator (lo:hi) in the low phase
+//	0..32(SP) h0..h4, each slot reused for r0..r3 once its h is consumed
+//
+// The result is stored only after all input reads, so the output may alias
+// either input.
+
+// func feMul(r, a, b *Fe)
+TEXT ·feMul(SB), NOSPLIT, $40-24
+	MOVQ a+8(FP), SI
+	MOVQ b+16(FP), BX
+	MOVQ 0(SI), R8
+	MOVQ 8(SI), R9
+	MOVQ 16(SI), R10
+	MOVQ 24(SI), R11
+	MOVQ 32(SI), R12
+	MOVQ $0x000FFFFFFFFFFFFF, R13
+
+	// High columns, carried into 52-bit digits h0..h4.
+	// p5 = a1*b4 + a2*b3 + a3*b2 + a4*b1
+	MOVQ R9, AX
+	MULQ 32(BX)
+	MOVQ AX, R15
+	MOVQ DX, R14
+	MOVQ R10, AX
+	MULQ 24(BX)
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R11, AX
+	MULQ 16(BX)
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R12, AX
+	MULQ 8(BX)
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R15, DI
+	ANDQ R13, DI
+	MOVQ DI, 0(SP)
+	SHRQ $52, R14, R15
+	SHRQ $52, R14
+
+	// p6 = a2*b4 + a3*b3 + a4*b2
+	MOVQ R10, AX
+	MULQ 32(BX)
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R11, AX
+	MULQ 24(BX)
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R12, AX
+	MULQ 16(BX)
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R15, DI
+	ANDQ R13, DI
+	MOVQ DI, 8(SP)
+	SHRQ $52, R14, R15
+	SHRQ $52, R14
+
+	// p7 = a3*b4 + a4*b3
+	MOVQ R11, AX
+	MULQ 32(BX)
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R12, AX
+	MULQ 24(BX)
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R15, DI
+	ANDQ R13, DI
+	MOVQ DI, 16(SP)
+	SHRQ $52, R14, R15
+	SHRQ $52, R14
+
+	// p8 = a4*b4
+	MOVQ R12, AX
+	MULQ 32(BX)
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R15, DI
+	ANDQ R13, DI
+	MOVQ DI, 24(SP)
+	SHRQ $52, R14, R15
+	MOVQ R15, 32(SP)
+
+	// Fold pass: t = p_i + r52*h_i column by column.
+	// t = p0 + r52*h0, p0 = a0*b0
+	MOVQ R8, AX
+	MULQ 0(BX)
+	MOVQ AX, DI
+	MOVQ DX, CX
+	MOVQ $0x1000003D10, AX
+	MULQ 0(SP)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ DI, R14
+	ANDQ R13, R14
+	MOVQ R14, 0(SP)
+	SHRQ $52, CX, DI
+	SHRQ $52, CX
+
+	// t += p1 + r52*h1, p1 = a0*b1 + a1*b0
+	MOVQ R8, AX
+	MULQ 8(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R9, AX
+	MULQ 0(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ $0x1000003D10, AX
+	MULQ 8(SP)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ DI, R14
+	ANDQ R13, R14
+	MOVQ R14, 8(SP)
+	SHRQ $52, CX, DI
+	SHRQ $52, CX
+
+	// t += p2 + r52*h2, p2 = a0*b2 + a1*b1 + a2*b0
+	MOVQ R8, AX
+	MULQ 16(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R9, AX
+	MULQ 8(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R10, AX
+	MULQ 0(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ $0x1000003D10, AX
+	MULQ 16(SP)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ DI, R14
+	ANDQ R13, R14
+	MOVQ R14, 16(SP)
+	SHRQ $52, CX, DI
+	SHRQ $52, CX
+
+	// t += p3 + r52*h3, p3 = a0*b3 + a1*b2 + a2*b1 + a3*b0
+	MOVQ R8, AX
+	MULQ 24(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R9, AX
+	MULQ 16(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R10, AX
+	MULQ 8(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R11, AX
+	MULQ 0(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ $0x1000003D10, AX
+	MULQ 24(SP)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ DI, R14
+	ANDQ R13, R14
+	MOVQ R14, 24(SP)
+	SHRQ $52, CX, DI
+	SHRQ $52, CX
+
+	// t += p4 + r52*h4, p4 = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0
+	MOVQ R8, AX
+	MULQ 32(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R9, AX
+	MULQ 24(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R10, AX
+	MULQ 16(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R11, AX
+	MULQ 8(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R12, AX
+	MULQ 0(BX)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ $0x1000003D10, AX
+	MULQ 32(SP)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ DI, R14
+	ANDQ R13, R14
+	SHRQ $52, CX, DI
+
+	// Wrap: w = r0 + t*r52 + (r4>>48)*c, r4 &= m48, r0 = w&m52,
+	// r1 += w>>52.
+	MOVQ $0x1000003D10, AX
+	MULQ DI
+	MOVQ AX, DI
+	MOVQ DX, CX
+	MOVQ R14, AX
+	SHRQ $48, AX
+	MOVQ $0x1000003D1, R9
+	MULQ R9
+	ADDQ AX, DI
+	ADCQ DX, CX
+	ADDQ 0(SP), DI
+	ADCQ $0, CX
+	MOVQ R13, R10
+	SHRQ $4, R10
+	ANDQ R10, R14
+	MOVQ DI, R11
+	ANDQ R13, R11
+	SHRQ $52, CX, DI
+	ADDQ 8(SP), DI
+
+	MOVQ r+0(FP), BX
+	MOVQ R11, 0(BX)
+	MOVQ DI, 8(BX)
+	MOVQ 16(SP), AX
+	MOVQ AX, 16(BX)
+	MOVQ 24(SP), AX
+	MOVQ AX, 24(BX)
+	MOVQ R14, 32(BX)
+	RET
+
+// func feSquare(r, a *Fe)
+TEXT ·feSquare(SB), NOSPLIT, $40-16
+	MOVQ a+8(FP), SI
+	MOVQ 0(SI), R8
+	MOVQ 8(SI), R9
+	MOVQ 16(SI), R10
+	MOVQ 24(SI), R11
+	MOVQ 32(SI), R12
+	MOVQ $0x000FFFFFFFFFFFFF, R13
+
+	// p5 = 2*a1*a4 + 2*a2*a3
+	MOVQ R9, AX
+	ADDQ AX, AX
+	MULQ R12
+	MOVQ AX, R15
+	MOVQ DX, R14
+	MOVQ R10, AX
+	ADDQ AX, AX
+	MULQ R11
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R15, DI
+	ANDQ R13, DI
+	MOVQ DI, 0(SP)
+	SHRQ $52, R14, R15
+	SHRQ $52, R14
+
+	// p6 = 2*a2*a4 + a3*a3
+	MOVQ R10, AX
+	ADDQ AX, AX
+	MULQ R12
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R11, AX
+	MULQ R11
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R15, DI
+	ANDQ R13, DI
+	MOVQ DI, 8(SP)
+	SHRQ $52, R14, R15
+	SHRQ $52, R14
+
+	// p7 = 2*a3*a4
+	MOVQ R11, AX
+	ADDQ AX, AX
+	MULQ R12
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R15, DI
+	ANDQ R13, DI
+	MOVQ DI, 16(SP)
+	SHRQ $52, R14, R15
+	SHRQ $52, R14
+
+	// p8 = a4*a4
+	MOVQ R12, AX
+	MULQ R12
+	ADDQ AX, R15
+	ADCQ DX, R14
+	MOVQ R15, DI
+	ANDQ R13, DI
+	MOVQ DI, 24(SP)
+	SHRQ $52, R14, R15
+	MOVQ R15, 32(SP)
+
+	// t = p0 + r52*h0, p0 = a0*a0
+	MOVQ R8, AX
+	MULQ R8
+	MOVQ AX, DI
+	MOVQ DX, CX
+	MOVQ $0x1000003D10, AX
+	MULQ 0(SP)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ DI, R14
+	ANDQ R13, R14
+	MOVQ R14, 0(SP)
+	SHRQ $52, CX, DI
+	SHRQ $52, CX
+
+	// t += p1 + r52*h1, p1 = 2*a0*a1
+	MOVQ R8, AX
+	ADDQ AX, AX
+	MULQ R9
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ $0x1000003D10, AX
+	MULQ 8(SP)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ DI, R14
+	ANDQ R13, R14
+	MOVQ R14, 8(SP)
+	SHRQ $52, CX, DI
+	SHRQ $52, CX
+
+	// t += p2 + r52*h2, p2 = 2*a0*a2 + a1*a1
+	MOVQ R8, AX
+	ADDQ AX, AX
+	MULQ R10
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R9, AX
+	MULQ R9
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ $0x1000003D10, AX
+	MULQ 16(SP)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ DI, R14
+	ANDQ R13, R14
+	MOVQ R14, 16(SP)
+	SHRQ $52, CX, DI
+	SHRQ $52, CX
+
+	// t += p3 + r52*h3, p3 = 2*a0*a3 + 2*a1*a2
+	MOVQ R8, AX
+	ADDQ AX, AX
+	MULQ R11
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R9, AX
+	ADDQ AX, AX
+	MULQ R10
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ $0x1000003D10, AX
+	MULQ 24(SP)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ DI, R14
+	ANDQ R13, R14
+	MOVQ R14, 24(SP)
+	SHRQ $52, CX, DI
+	SHRQ $52, CX
+
+	// t += p4 + r52*h4, p4 = 2*a0*a4 + 2*a1*a3 + a2*a2
+	MOVQ R8, AX
+	ADDQ AX, AX
+	MULQ R12
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R9, AX
+	ADDQ AX, AX
+	MULQ R11
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ R10, AX
+	MULQ R10
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ $0x1000003D10, AX
+	MULQ 32(SP)
+	ADDQ AX, DI
+	ADCQ DX, CX
+	MOVQ DI, R14
+	ANDQ R13, R14
+	SHRQ $52, CX, DI
+
+	// Wrap, identical to feMul.
+	MOVQ $0x1000003D10, AX
+	MULQ DI
+	MOVQ AX, DI
+	MOVQ DX, CX
+	MOVQ R14, AX
+	SHRQ $48, AX
+	MOVQ $0x1000003D1, R9
+	MULQ R9
+	ADDQ AX, DI
+	ADCQ DX, CX
+	ADDQ 0(SP), DI
+	ADCQ $0, CX
+	MOVQ R13, R10
+	SHRQ $4, R10
+	ANDQ R10, R14
+	MOVQ DI, R11
+	ANDQ R13, R11
+	SHRQ $52, CX, DI
+	ADDQ 8(SP), DI
+
+	MOVQ r+0(FP), BX
+	MOVQ R11, 0(BX)
+	MOVQ DI, 8(BX)
+	MOVQ 16(SP), AX
+	MOVQ AX, 16(BX)
+	MOVQ 24(SP), AX
+	MOVQ AX, 24(BX)
+	MOVQ R14, 32(BX)
+	RET

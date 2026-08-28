@@ -40,7 +40,9 @@ require (
 )
 
 replace (
+	github.com/btcsuite/btcd/btcec/v2 => ./btcec
 	github.com/btcsuite/btcd/btcutil/v2 => ./btcutil
+	github.com/btcsuite/btcd/txscript/v2 => ./txscript
 	github.com/btcsuite/btcd/wire/v2 => ./wire
 )
 

@@ -2428,12 +2428,12 @@ func opcodeCheckMultiSig(op *opcode, data []byte, vm *Engine) error {
 			copy(sigHash[:], hash)
 
 			valid = vm.sigCache.Exists(sigHash, signature, pubKey)
-			if !valid && parsedSig.Verify(hash, parsedPubKey) {
+			if !valid && ecdsa.Verify(parsedSig, hash, parsedPubKey) {
 				vm.sigCache.Add(sigHash, signature, pubKey)
 				valid = true
 			}
 		} else {
-			valid = parsedSig.Verify(hash, parsedPubKey)
+			valid = ecdsa.Verify(parsedSig, hash, parsedPubKey)
 		}
 
 		if valid {
