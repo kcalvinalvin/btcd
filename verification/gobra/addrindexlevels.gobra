@@ -1,0 +1,208 @@
+// Copyright (c) 2026 The btcsuite developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package indexers
+
+const level0MaxEntries = 8
+const txEntrySize = 4 + 4 + 4
+
+ghost
+decreases len(counts)
+pure func addrEntryCount(counts seq[int]) int {
+	return len(counts) == 0 ? 0 :
+		addrEntryCount(counts[:len(counts)-1]) + counts[len(counts)-1]
+}
+
+ghost
+requires forall i int :: {counts[i]} 0 <= i && i < len(counts) ==> counts[i] >= 0
+ensures addrEntryCount(counts) >= 0
+decreases len(counts)
+func addrEntryCountNonnegative(counts seq[int]) {
+	if len(counts) > 0 {
+		addrEntryCountNonnegative(counts[:len(counts)-1])
+	}
+}
+
+ghost
+requires level >= 0
+decreases level
+pure func addrLevelCapacity(level int) int {
+	return level == 0 ? level0MaxEntries : 2 * addrLevelCapacity(level - 1)
+}
+
+ghost
+requires remaining >= 0 && half > 0
+requires remaining % half == 0
+ensures remaining % (2 * half) == 0 || remaining % (2 * half) == half
+ensures remaining > 0 ==> (remaining % (2 * half) == 0 ? 2 * half <= remaining : half <= remaining)
+decreases
+func addrLevelRemainder(remaining, half int) {
+	ghost quotient := remaining / (2 * half)
+	ghost remainder := remaining % (2 * half)
+	ghost multiple := remaining / half - 2 * quotient
+	assert remaining == (remaining / half) * half
+	assert remaining == quotient * (2 * half) + remainder
+	assert remainder == multiple * half
+	assert 0 <= multiple && multiple < 2
+	assert quotient >= 0
+	if remaining > 0 && remainder == 0 {
+		assert quotient > 0
+	}
+}
+
+ghost
+requires multiple >= 0 && maxEntries > 0
+ensures (multiple * maxEntries) % maxEntries == 0
+decreases
+func addrMultipleRemainder(multiple, maxEntries int) {
+	ghost value := multiple * maxEntries
+	assert value >= 0
+	ghost quotient := value / maxEntries
+	ghost remainder := value % maxEntries
+	assert value == quotient * maxEntries + remainder
+	assert remainder == (multiple - quotient) * maxEntries
+	if multiple < quotient {
+		assert (multiple - quotient) * maxEntries < 0
+		assert false
+	}
+	if multiple > quotient {
+		assert (multiple - quotient) * maxEntries >= maxEntries
+		assert false
+	}
+	assert multiple == quotient
+}
+
+requires 0 <= numEntries && numEntries <= 9223372036854775807 / txEntrySize
+ensures acc(counts)
+ensures addrEntryCount(seq(counts)) == numEntries
+ensures (len(counts) == 0) == (numEntries == 0)
+ensures len(counts) <= numEntries
+ensures len(counts) > 0 ==> 1 <= counts[0] && counts[0] <= level0MaxEntries
+ensures forall level int :: {counts[level]} 0 <= level && level < len(counts) ==> counts[level] > 0
+ensures forall level int :: {counts[level]} 1 <= level && level < len(counts) ==>
+	counts[level] == addrLevelCapacity(level) / 2 || counts[level] == addrLevelCapacity(level)
+decreases
+func addrLevelEntryCounts(numEntries int) (counts []int) {
+	if numEntries == 0 {
+		return nil
+	}
+
+	levelCounts := []int{(numEntries-1)%level0MaxEntries + 1}
+	remaining := numEntries - levelCounts[0]
+	assert addrEntryCount(seq[int]{}) == 0
+	assert seq(levelCounts)[:0] == seq[int]{}
+	assert addrEntryCount(seq(levelCounts)) == levelCounts[0]
+	assert addrLevelCapacity(0) == level0MaxEntries
+	assert addrLevelCapacity(1) == level0MaxEntries * 2
+	invariant acc(levelCounts)
+	invariant 0 < len(levelCounts)
+	invariant len(levelCounts) <= numEntries - remaining
+	invariant 1 <= levelCounts[0] && levelCounts[0] <= level0MaxEntries
+	invariant forall level int :: {levelCounts[level]} 0 <= level && level < len(levelCounts) ==> levelCounts[level] > 0
+	invariant addrEntryCount(seq(levelCounts)) + remaining == numEntries
+	invariant 0 <= remaining && remaining <= numEntries
+	invariant maxEntries >= level0MaxEntries * 2 && maxEntries % 2 == 0
+	invariant maxEntries == addrLevelCapacity(len(levelCounts))
+	invariant forall level int :: {levelCounts[level]} 1 <= level && level < len(levelCounts) ==>
+		levelCounts[level] == addrLevelCapacity(level) / 2 || levelCounts[level] == addrLevelCapacity(level)
+	invariant remaining % (maxEntries / 2) == 0
+	invariant maxEntries <= 2 * (numEntries - remaining + level0MaxEntries)
+	decreases remaining
+	for maxEntries := level0MaxEntries * 2; remaining > 0; maxEntries *= 2 {
+		addrLevelRemainder(remaining, maxEntries / 2)
+		assert maxEntries == 2 * (maxEntries / 2)
+		ghost fullLevels := remaining / maxEntries
+		assert remaining == fullLevels * maxEntries + remaining % maxEntries
+		levelEntries := maxEntries / 2
+		if remaining%maxEntries == 0 {
+			levelEntries = maxEntries
+			fullLevels--
+		}
+		assert remaining == fullLevels * maxEntries + levelEntries
+		assert 0 < levelEntries && levelEntries <= remaining
+		assert len(levelCounts) + 1 <= 9223372036854775807
+		assert addrLevelCapacity(len(levelCounts) + 1) == 2 * maxEntries
+		ghost previousCounts := seq(levelCounts)
+		levelCounts = append(perm(1), levelCounts, levelEntries)
+		assert seq(levelCounts)[:len(previousCounts)] == previousCounts
+		assert addrEntryCount(seq(levelCounts)) == addrEntryCount(previousCounts) + levelEntries
+		remaining -= levelEntries
+		assert remaining == fullLevels * maxEntries
+		assert remaining >= 0 && fullLevels >= 0
+		addrMultipleRemainder(fullLevels, maxEntries)
+		assert remaining % maxEntries == 0
+		assert 0 <= remaining && remaining <= 9223372036854775807
+		assert 0 < maxEntries * 2 && maxEntries * 2 <= 9223372036854775807
+	}
+	return levelCounts
+}
+
+requires acc(entries)
+requires len(entries) <= 9223372036854775807
+requires len(entries) % txEntrySize == 0
+ensures acc(entries)
+ensures acc(result)
+ensures seq(entries) == old(seq(entries))
+ensures len(result) == len(levelCounts)
+ensures addrEntryCount(levelCounts) * txEntrySize == len(entries)
+ensures (len(result) == 0) == (len(entries) == 0)
+ensures len(result) > 0 ==> 1 <= levelCounts[0] && levelCounts[0] <= level0MaxEntries
+ensures forall level int :: {result[level]} 0 <= level && level < len(result) ==>
+	levelCounts[level] > 0 && len(result[level]) == levelCounts[level] * txEntrySize &&
+	0 <= len(entries) - addrEntryCount(levelCounts[:level+1]) * txEntrySize &&
+	len(entries) - addrEntryCount(levelCounts[:level+1]) * txEntrySize + levelCounts[level] * txEntrySize <= len(entries) &&
+	result[level] === entries[len(entries) - addrEntryCount(levelCounts[:level+1]) * txEntrySize:
+		len(entries) - addrEntryCount(levelCounts[:level+1]) * txEntrySize + levelCounts[level] * txEntrySize]
+ensures forall level int :: {result[level]} 1 <= level && level < len(result) ==>
+	levelCounts[level] == addrLevelCapacity(level) / 2 || levelCounts[level] == addrLevelCapacity(level)
+decreases
+func addrLevelValues(entries []byte) (result [][]byte, ghost levelCounts seq[int]) {
+	counts := addrLevelEntryCounts(len(entries) / txEntrySize)
+	ghost entryCounts := seq(counts)
+	assert (len(entries) / txEntrySize) * txEntrySize == len(entries)
+	assert addrEntryCount(entryCounts) * txEntrySize == len(entries)
+	assert entryCounts[:len(counts)] == entryCounts
+	levels := make([][]byte, len(counts))
+	offset := 0
+	invariant -1 <= level && level < len(counts)
+	invariant len(levels) == len(counts)
+	invariant 0 <= offset && offset <= len(entries)
+	invariant acc(counts)
+	invariant seq(counts) == entryCounts
+	invariant acc(levels)
+	invariant acc(entries)
+	invariant addrEntryCount(entryCounts[:level+1]) * txEntrySize + offset == len(entries)
+	invariant addrEntryCount(entryCounts) * txEntrySize == len(entries)
+	invariant (len(counts) == 0) == (len(entries) == 0)
+	invariant len(counts) > 0 ==> 1 <= counts[0] && counts[0] <= level0MaxEntries
+	invariant forall i int :: {counts[i]} 0 <= i && i < len(counts) ==> counts[i] > 0
+	invariant forall i int :: {counts[i]} 1 <= i && i < len(counts) ==>
+		counts[i] == addrLevelCapacity(i) / 2 || counts[i] == addrLevelCapacity(i)
+	invariant forall i int :: {levels[i]} level < i && i < len(levels) ==>
+		entryCounts[i] > 0 && len(levels[i]) == entryCounts[i] * txEntrySize &&
+		0 <= len(entries) - addrEntryCount(entryCounts[:i+1]) * txEntrySize &&
+		len(entries) - addrEntryCount(entryCounts[:i+1]) * txEntrySize + entryCounts[i] * txEntrySize <= len(entries) &&
+		levels[i] === entries[len(entries) - addrEntryCount(entryCounts[:i+1]) * txEntrySize:
+			len(entries) - addrEntryCount(entryCounts[:i+1]) * txEntrySize + entryCounts[i] * txEntrySize]
+	invariant seq(entries) == old(seq(entries))
+	decreases level + 1
+	for level := len(counts) - 1; level >= 0; level -= 1 {
+		ghost prefix := entryCounts[:level+1]
+		assert prefix[:len(prefix)-1] == entryCounts[:level]
+		assert prefix[len(prefix)-1] == counts[level]
+		assert addrEntryCount(prefix) == addrEntryCount(prefix[:len(prefix)-1]) + prefix[len(prefix)-1]
+		assert addrEntryCount(entryCounts[:level+1]) == addrEntryCount(entryCounts[:level]) + counts[level]
+		addrEntryCountNonnegative(entryCounts[:level])
+		end := offset + counts[level]*txEntrySize
+		assert 0 <= offset && offset <= end && end <= len(entries)
+		assert end <= 9223372036854775807
+		levels[level] = entries[offset:end]
+		assert len(levels[level]) == counts[level] * txEntrySize
+		assert offset == len(entries) - addrEntryCount(entryCounts[:level+1]) * txEntrySize
+		assert 0 <= len(entries) - addrEntryCount(entryCounts[:level+1]) * txEntrySize
+		assert len(entries) - addrEntryCount(entryCounts[:level+1]) * txEntrySize + len(levels[level]) <= len(entries)
+		offset = end
+	}
+	return levels, entryCounts
+}

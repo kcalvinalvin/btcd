@@ -134,6 +134,11 @@ type Manager struct {
 	enabledIndexes []Indexer
 }
 
+type staleBuildDropper interface {
+	dropStaleBuild(chain *blockchain.BlockChain,
+		interrupt <-chan struct{}) (bool, error)
+}
+
 // Ensure the Manager type implements the blockchain.IndexManager interface.
 var _ blockchain.IndexManager = (*Manager)(nil)
 
@@ -225,6 +230,18 @@ func (m *Manager) maybeCreateIndexes(dbTx database.Tx) error {
 	return nil
 }
 
+// createIndexes creates the index tips bucket and any missing indexes.
+func (m *Manager) createIndexes() error {
+	return m.db.Update(func(dbTx database.Tx) error {
+		meta := dbTx.Metadata()
+		_, err := meta.CreateBucketIfNotExists(indexTipsBucketName)
+		if err != nil {
+			return err
+		}
+		return m.maybeCreateIndexes(dbTx)
+	})
+}
+
 // Init initializes the enabled indexes.  This is called during chain
 // initialization and primarily consists of catching up all indexes to the
 // current best chain tip.  This is necessary since each index can be disabled
@@ -249,17 +266,7 @@ func (m *Manager) Init(chain *blockchain.BlockChain, interrupt <-chan struct{}) 
 	}
 
 	// Create the initial state for the indexes as needed.
-	err := m.db.Update(func(dbTx database.Tx) error {
-		// Create the bucket for the current tips as needed.
-		meta := dbTx.Metadata()
-		_, err := meta.CreateBucketIfNotExists(indexTipsBucketName)
-		if err != nil {
-			return err
-		}
-
-		return m.maybeCreateIndexes(dbTx)
-	})
-	if err != nil {
+	if err := m.createIndexes(); err != nil {
 		return err
 	}
 
@@ -277,13 +284,28 @@ func (m *Manager) Init(chain *blockchain.BlockChain, interrupt <-chan struct{}) 
 	for i := len(m.enabledIndexes); i > 0; i-- {
 		indexer := m.enabledIndexes[i-1]
 
+		// Staged entries above the published tip cannot be disconnected
+		// one block at a time.
+		if dropper, ok := indexer.(staleBuildDropper); ok {
+			dropped, err := dropper.dropStaleBuild(chain, interrupt)
+			if err != nil {
+				return err
+			}
+			if dropped {
+				if err := m.createIndexes(); err != nil {
+					return err
+				}
+			}
+		}
+
 		// Fetch the current tip for the index.
 		var height int32
 		var hash *chainhash.Hash
 		err := m.db.View(func(dbTx database.Tx) error {
 			idxKey := indexer.Key()
-			hash, height, err = dbFetchIndexerTip(dbTx, idxKey)
-			return err
+			var fetchErr error
+			hash, height, fetchErr = dbFetchIndexerTip(dbTx, idxKey)
+			return fetchErr
 		})
 		if err != nil {
 			return err
@@ -361,14 +383,24 @@ func (m *Manager) Init(chain *blockchain.BlockChain, interrupt <-chan struct{}) 
 		}
 	}
 
-	// Fetch the current tip heights for each index along with tracking the
-	// lowest one so the catchup code only needs to start at the earliest
-	// block and is able to skip connecting the block for the indexes that
-	// don't need it.
+	// Give each bulk builder a chance to advance its index before ordinary
+	// catchup.
+	for _, indexer := range m.enabledIndexes {
+		builder, ok := indexer.(FastBuilder)
+		if !ok {
+			continue
+		}
+		if err := builder.FastBuild(chain, interrupt); err != nil {
+			return err
+		}
+	}
+
+	// Fetch the current tip heights and find the earliest block needed by
+	// ordinary catchup.
 	bestHeight := chain.BestSnapshot().Height
 	lowestHeight := bestHeight
 	indexerHeights := make([]int32, len(m.enabledIndexes))
-	err = m.db.View(func(dbTx database.Tx) error {
+	err := m.db.View(func(dbTx database.Tx) error {
 		for i, indexer := range m.enabledIndexes {
 			idxKey := indexer.Key()
 			hash, height, err := dbFetchIndexerTip(dbTx, idxKey)
@@ -595,20 +627,27 @@ func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan s
 	var subBucketClosure func(database.Tx, []byte, [][]byte) error
 	subBucketClosure = func(dbTx database.Tx,
 		subBucket []byte, tlBucket [][]byte) error {
-		// Get full bucket name and append to subBuckets for later
-		// deletion.
-		var bucketName [][]byte
-		if (tlBucket == nil) || (len(tlBucket) == 0) {
-			bucketName = append(bucketName, subBucket)
-		} else {
-			bucketName = append(tlBucket, subBucket)
-		}
-		subBuckets = append(subBuckets, bucketName)
-		// Recurse sub-buckets to append to subBuckets slice.
+		// Copy the full bucket path so it remains valid after this
+		// transaction and does not share storage with sibling paths.
+		bucketName := make([][]byte, len(tlBucket)+1)
+		copy(bucketName, tlBucket)
+		bucketName[len(tlBucket)] = append([]byte(nil), subBucket...)
+
+		// A prior drop attempt might have deleted the top-level bucket
+		// before it was interrupted between transactions.  Treat a missing
+		// bucket as already emptied so the persisted drop marker can still be
+		// cleared safely on this attempt.
 		bucket := dbTx.Metadata()
 		for _, subBucketName := range bucketName {
 			bucket = bucket.Bucket(subBucketName)
+			if bucket == nil {
+				return nil
+			}
 		}
+
+		// Append the existing bucket for later deletion and recurse through
+		// its sub-buckets.
+		subBuckets = append(subBuckets, bucketName)
 		return bucket.ForEachBucket(func(k []byte) error {
 			return subBucketClosure(dbTx, k, bucketName)
 		})
@@ -619,7 +658,7 @@ func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan s
 		return subBucketClosure(dbTx, idxKey, nil)
 	})
 	if err != nil {
-		return nil
+		return err
 	}
 
 	// Iterate through each sub-bucket in reverse, deepest-first, deleting
@@ -668,6 +707,9 @@ func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan s
 			}
 			return bucket.DeleteBucket(bucketName[len(bucketName)-1])
 		})
+		if err != nil {
+			return err
+		}
 	}
 
 	// Call extra index specific deinitialization for the transaction index.
@@ -677,8 +719,8 @@ func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan s
 		}
 	}
 
-	// Remove the index tip, index bucket, and in-progress drop flag now
-	// that all index entries have been removed.
+	// Remove the index tip and in-progress drop flag now that the index bucket
+	// and all of its entries have been removed.
 	err = db.Update(func(dbTx database.Tx) error {
 		meta := dbTx.Metadata()
 		indexesBucket := meta.Bucket(indexTipsBucketName)

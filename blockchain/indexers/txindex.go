@@ -461,12 +461,17 @@ func NewTxIndex(db database.DB) *TxIndex {
 func dropBlockIDIndex(db database.DB) error {
 	return db.Update(func(dbTx database.Tx) error {
 		meta := dbTx.Metadata()
-		err := meta.DeleteBucket(idByHashIndexBucketName)
-		if err != nil {
-			return err
+		if meta.Bucket(idByHashIndexBucketName) != nil {
+			if err := meta.DeleteBucket(idByHashIndexBucketName); err != nil {
+				return err
+			}
 		}
 
-		return meta.DeleteBucket(hashByIDIndexBucketName)
+		if meta.Bucket(hashByIDIndexBucketName) != nil {
+			return meta.DeleteBucket(hashByIDIndexBucketName)
+		}
+
+		return nil
 	})
 }
 
@@ -480,6 +485,29 @@ func DropTxIndex(db database.DB, interrupt <-chan struct{}) error {
 	}
 
 	return dropIndex(db, txIndexKey, txIndexName, interrupt)
+}
+
+// DropTxIndexWithDataDir drops the transaction index and removes any dependent
+// address fast-build staging under dataDir.
+func DropTxIndexWithDataDir(db database.DB, dataDir string,
+	interrupt <-chan struct{}) error {
+
+	_, buildExists, err := addrIndexBuildDirExists(dataDir)
+	if err != nil {
+		return err
+	}
+	if buildExists {
+		if _, err := addrBuildFlusher(db); err != nil {
+			return err
+		}
+	}
+	if err := DropTxIndex(db, interrupt); err != nil {
+		return err
+	}
+	if !buildExists {
+		return removeAddrIndexBuildDeleteDir(dataDir)
+	}
+	return removeAddrIndexBuildStaging(db, dataDir)
 }
 
 // TxIndexInitialized returns true if the tx index has been created previously.
