@@ -47,6 +47,19 @@ target with 64-bit `int`. Arithmetic bounds are explicit in the proof.
 Gobra's experimental `--overflow` pass raises an internal exception for the
 level proof in the tool version below.
 
+`addrindexrange.go` checks three functions in
+`blockchain/indexers/addrindexrange.go`, with `--overflow` enabled:
+
+* `addrBuildScanRange` starts at the height after `completed` and ends at
+  the target or the chunk limit. A completed scan produces an empty range.
+  Its contract covers `-1 <= completed <= target <= MaxInt32`, with a
+  nonnegative target. The position after `MaxInt32` remains representable.
+* `addrBuildBlockID` maps heights from `-1` through `MaxInt32` to height
+  plus one, including the empty index and genesis.
+* `addrScanHeight` accepts a nonnegative cursor exactly when it is at most
+  the end height. An accepted cursor fits in `int32` and converts exactly.
+  The end height must be between zero and `MaxInt32`.
+
 ## Run
 
 Requirements are Go, Java 21, Z3 4.16.0, and Gobra. This proof was checked
@@ -75,7 +88,9 @@ and source comparison pass.
 ## Connection to the Go source
 
 All proof helpers have checked bodies. The level proof uses `.gobra`
-syntax. Gobra verifies this input and erases its ghost code.
+syntax. The range proof uses a Go file with Gobra annotations in comments
+and an `ignore` build constraint. Gobra verifies these explicit inputs and
+erases their ghost code.
 
 `sourcecheck` requires every listed function, type, and constant to match
 the production Go declarations. It compares normalized Go tokens, keeping
@@ -83,6 +98,15 @@ operators, conversion operands, variadic expansion, and type definitions.
 Grouped parameters and unused proof result names are normalized. It also
 loads the compiled source package with `go/types` to check references to
 predeclared names, including `append`, `copy`, `int`, and `nil`.
+
+The pinned Gobra eraser drops conversion operands and omits parentheses
+around pointer conversions. For the annotated Go proofs, the checker first
+compares the complete Go code to production, with operands intact. It
+rejects comments in conversion statements and conditions, then compares
+against ghost erasure using the eraser's conversion representation. Executable annotations
+elsewhere must also agree with the erased code. Unexpected declarations
+and missing proof members fail the check. Tests cover changed conversion
+operands, executable annotations, and missing declarations.
 
 The Go tests cover the destination write range, multi-batch replay,
 cancellation, malformed entries, and decoder compatibility with the address

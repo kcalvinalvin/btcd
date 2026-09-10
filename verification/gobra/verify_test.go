@@ -31,6 +31,7 @@ func TestVerifyToolPaths(t *testing.T) {
 			files := map[string]string{
 				filepath.Join(root, "verification/gobra/verify.sh"):             string(runner),
 				filepath.Join(root, "verification/gobra/addrindexlevels.gobra"): "package indexers\n",
+				filepath.Join(root, "verification/gobra/addrindexrange.go"):     "package indexers\n",
 				filepath.Join(tools, "server.jar"):                              "jar\n",
 				filepath.Join(tools, "z3"):                                      "#!/usr/bin/env bash\nexit 0\n",
 				filepath.Join(tools, "java"): `#!/usr/bin/env bash

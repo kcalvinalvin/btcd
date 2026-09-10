@@ -19,6 +19,7 @@ import (
 
 var verifiedDeclarations = []string{
 	"addrLevelEntryCounts", "addrLevelValues", "level0MaxEntries", "txEntrySize",
+	"addrBuildScanRange", "addrBuildBlockID", "addrScanHeight", "addrBuildScanChunkSize",
 }
 
 type sourcePaths []string

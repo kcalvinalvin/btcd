@@ -9,20 +9,26 @@ gobra_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 gobra_tmp_dir=$(mktemp -d)
 trap 'rm -rf -- "$gobra_tmp_dir"' EXIT
 
-for proof in addrindexlevels.gobra; do
+for proof in addrindexlevels.gobra addrindexrange.go; do
 	cp "$gobra_root/verification/gobra/$proof" "$gobra_tmp_dir/"
 	cd "$gobra_tmp_dir"
-
+	overflow=()
+	if [[ "$proof" = addrindexrange.go ]]; then
+		overflow=(--overflow)
+	fi
 	"$gobra_java" -Xss128m -Xmx2g -cp "$gobra_jar" \
 		viper.gobra.GobraRunner \
 		--z3Exe "$gobra_z3" \
 		--checkConsistency --noassumeInjectivityOnInhale --chop 100 \
 		--eraseGhost --logLevel INFO --packageTimeout 120s --assertTimeout 10000 \
-		-i "$gobra_tmp_dir/$proof"
+		"${overflow[@]}" -i "$gobra_tmp_dir/$proof"
 done
 
 cd "$gobra_root"
 go run ./verification/gobra/sourcecheck \
 	-source blockchain/indexers/addrindexlevels.go \
 	-source blockchain/indexers/addrindex.go \
-	"$gobra_tmp_dir/addrindexlevels.gobra.ghostLess"
+	-source blockchain/indexers/addrindexrange.go \
+	-source blockchain/indexers/addrindexbuild.go \
+	"$gobra_tmp_dir/addrindexlevels.gobra.ghostLess" \
+	"$gobra_tmp_dir/addrindexrange.go"
