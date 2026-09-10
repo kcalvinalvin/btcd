@@ -31,6 +31,7 @@ func TestVerifyToolPaths(t *testing.T) {
 			files := map[string]string{
 				filepath.Join(root, "verification/gobra/verify.sh"):             string(runner),
 				filepath.Join(root, "verification/gobra/addrindexlevels.gobra"): "package indexers\n",
+				filepath.Join(root, "verification/gobra/addrindexentries.go"):   "package indexers\n",
 				filepath.Join(root, "verification/gobra/addrindexrange.go"):     "package indexers\n",
 				filepath.Join(tools, "server.jar"):                              "jar\n",
 				filepath.Join(tools, "z3"):                                      "#!/usr/bin/env bash\nexit 0\n",
@@ -53,6 +54,8 @@ set -euo pipefail
 case "$1" in
 	run) [[ -f "${!#}" ]]
 		printf 'sourcecheck reached\n' ;;
+	test) [[ "$GOBRA_JAR" = /* && "$GOBRA_JAVA" = /* && "$Z3_EXE" = /* ]]
+		printf 'capacity checks reached\n' ;;
 	*) exit 14 ;;
 esac
 `,
@@ -87,7 +90,9 @@ esac
 			command := exec.Command("bash", filepath.Join(root, "verification/gobra/verify.sh"))
 			command.Dir = caller
 			output, err := command.CombinedOutput()
-			if err != nil || !strings.Contains(string(output), "sourcecheck reached") {
+			if err != nil || !strings.Contains(string(output), "sourcecheck reached") ||
+				!strings.Contains(string(output), "capacity checks reached") {
+
 				t.Fatalf("runner error = %v\n%s", err, output)
 			}
 		})

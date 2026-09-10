@@ -9,7 +9,7 @@ gobra_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 gobra_tmp_dir=$(mktemp -d)
 trap 'rm -rf -- "$gobra_tmp_dir"' EXIT
 
-for proof in addrindexlevels.gobra addrindexrange.go; do
+for proof in addrindexlevels.gobra addrindexentries.go addrindexrange.go; do
 	cp "$gobra_root/verification/gobra/$proof" "$gobra_tmp_dir/"
 	cd "$gobra_tmp_dir"
 	overflow=()
@@ -28,7 +28,13 @@ cd "$gobra_root"
 go run ./verification/gobra/sourcecheck \
 	-source blockchain/indexers/addrindexlevels.go \
 	-source blockchain/indexers/addrindex.go \
+	-source blockchain/indexers/addrindexentries.go \
+	-source blockchain/indexers/addrindexstaging.go \
 	-source blockchain/indexers/addrindexrange.go \
 	-source blockchain/indexers/addrindexbuild.go \
 	"$gobra_tmp_dir/addrindexlevels.gobra.ghostLess" \
+	"$gobra_tmp_dir/addrindexentries.go" \
 	"$gobra_tmp_dir/addrindexrange.go"
+
+GOBRA_JAR="$gobra_jar" GOBRA_JAVA="$gobra_java" Z3_EXE="$gobra_z3" \
+	go test ./verification/gobra -run '^TestAddrEntryCapacity$' -count=1

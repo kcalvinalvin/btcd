@@ -1,0 +1,44 @@
+// Copyright (c) 2026 The btcsuite developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package indexers
+
+decreases
+func addrLevelEntriesCapacity() {
+	backing := make([]byte, 3*txEntrySize)
+	value := make([]byte, txEntrySize)
+	value[0] = 1
+	baseBlockID := addrEntryBlockID(value)
+	ghost valueBytes := seq(value)
+	assert valueBytes[:0] == seq[byte]{}
+	assert valueBytes[0:] == valueBytes
+	assert addrBaseEntries(valueBytes, baseBlockID) == valueBytes
+	offset := appendAddrLevelEntries(backing, value, 0, baseBlockID)
+	assert offset == txEntrySize
+	assert backing[0] == 1
+	offset = appendAddrLevelEntries(backing, value, offset, baseBlockID)
+	assert offset == 2*txEntrySize
+	assert backing[txEntrySize] == 1
+	assert backing[2*txEntrySize] == 0
+}
+
+requires len(records) == 1
+requires acc(addrRecordAccess(&records[0]), 1/2)
+requires unfolding acc(addrRecordAccess(&records[0]), 1/2) in records[0][addrKeySize] == 1
+decreases
+func addrRecordEntriesCapacity(records []addrRecord) {
+	backing := make([]byte, 3*txEntrySize)
+	unfold acc(addrRecordAccess(&records[0]), 1/2)
+	record := (*[addrRecordSize]byte)(&records[0])
+	ghost recordValues := seq[seq[byte]]{seq(record[:])}
+	assert forall j int :: {&record[j]} 0 <= j && j < addrRecordSize ==> &record[j] == &records[0][j]
+	fold acc(addrRecordAccess(&records[0]), 1/2)
+	offset := appendAddrRecordEntries(backing, records, 0, recordValues)
+	assert offset == txEntrySize
+	assert backing[0] == 1
+	offset = appendAddrRecordEntries(backing, records, offset, recordValues)
+	assert offset == 2*txEntrySize
+	assert backing[txEntrySize] == 1
+	assert backing[2*txEntrySize] == 0
+}

@@ -19,6 +19,8 @@ import (
 
 var verifiedDeclarations = []string{
 	"addrLevelEntryCounts", "addrLevelValues", "level0MaxEntries", "txEntrySize",
+	"addrEntryBlockID", "appendAddrEntry", "appendAddrLevelEntries", "appendAddrRecordEntries",
+	"addrRecord", "addrRecordSize", "addrKeySize",
 	"addrBuildScanRange", "addrBuildBlockID", "addrScanHeight", "addrBuildScanChunkSize",
 }
 
