@@ -597,14 +597,11 @@ func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan s
 	var subBucketClosure func(database.Tx, []byte, [][]byte) error
 	subBucketClosure = func(dbTx database.Tx,
 		subBucket []byte, tlBucket [][]byte) error {
-		// Get full bucket name and append to subBuckets for later
-		// deletion.
-		var bucketName [][]byte
-		if (tlBucket == nil) || (len(tlBucket) == 0) {
-			bucketName = append(bucketName, subBucket)
-		} else {
-			bucketName = append(tlBucket, subBucket)
-		}
+		// Copy the full bucket path so it remains valid after this
+		// transaction and does not share storage with sibling paths.
+		bucketName := make([][]byte, len(tlBucket)+1)
+		copy(bucketName, tlBucket)
+		bucketName[len(tlBucket)] = append([]byte(nil), subBucket...)
 		subBuckets = append(subBuckets, bucketName)
 		// Recurse sub-buckets to append to subBuckets slice.
 		bucket := dbTx.Metadata()
