@@ -272,3 +272,73 @@ func TestManagerCatchUp(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []int32{best.Height, best.Height}, tips)
 }
+
+// fastBuildTestIndex is a FastBuilder that records the tips of other indexes
+// when FastBuild runs and sets its own tip to the chain tip.
+type fastBuildTestIndex struct {
+	catchUpTestIndex
+	db       database.DB
+	needed   bool
+	observed [][]byte
+	tips     []int32
+}
+
+func (idx *fastBuildTestIndex) NeedsFastBuild(
+	*blockchain.BlockChain) (bool, error) {
+
+	return idx.needed, nil
+}
+
+func (idx *fastBuildTestIndex) FastBuild(chain *blockchain.BlockChain,
+	interrupt <-chan struct{}) error {
+
+	tips, err := fetchTestIndexTips(idx.db, idx.observed...)
+	if err != nil {
+		return err
+	}
+	idx.tips = tips
+
+	best := chain.BestSnapshot()
+	return idx.db.Update(func(dbTx database.Tx) error {
+		return dbPutIndexerTip(dbTx, idx.key, &best.Hash, best.Height)
+	})
+}
+
+// TestManagerFastBuild ensures Manager.Init catches up the indexes before a
+// FastBuilder that needs a build, calls FastBuild before it catches up later
+// indexes, and connects blocks only to the indexes the build left behind.
+func TestManagerFastBuild(t *testing.T) {
+	tests := []struct {
+		name          string
+		needed        bool
+		wantTips      []int32
+		wantConnected int
+	}{
+		{name: "build_not_needed", wantConnected: 1},
+		{name: "build_needed", needed: true, wantTips: []int32{0, -1}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, chain := newManagerTestChain(t)
+			earlier := &catchUpTestIndex{key: []byte("earlier")}
+			later := &catchUpTestIndex{key: []byte("later")}
+			builder := &fastBuildTestIndex{
+				catchUpTestIndex: catchUpTestIndex{
+					key: []byte("builder"),
+				},
+				db:       db,
+				needed:   test.needed,
+				observed: [][]byte{earlier.key, later.key},
+			}
+			indexes := []Indexer{earlier, builder, later}
+			manager := NewManager(db, indexes)
+			require.NoError(t, manager.Init(chain, nil))
+
+			require.Equal(t, test.wantTips, builder.tips,
+				"earlier and later tips during FastBuild")
+			require.Equal(t, test.wantConnected, builder.connected)
+			require.Equal(t, 1, earlier.connected)
+			require.Equal(t, 1, later.connected)
+		})
+	}
+}
