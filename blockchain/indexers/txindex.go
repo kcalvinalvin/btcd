@@ -461,12 +461,18 @@ func NewTxIndex(db database.DB) *TxIndex {
 func dropBlockIDIndex(db database.DB) error {
 	return db.Update(func(dbTx database.Tx) error {
 		meta := dbTx.Metadata()
-		err := meta.DeleteBucket(idByHashIndexBucketName)
-		if err != nil {
-			return err
+		if meta.Bucket(idByHashIndexBucketName) != nil {
+			err := meta.DeleteBucket(idByHashIndexBucketName)
+			if err != nil {
+				return err
+			}
 		}
 
-		return meta.DeleteBucket(hashByIDIndexBucketName)
+		if meta.Bucket(hashByIDIndexBucketName) != nil {
+			return meta.DeleteBucket(hashByIDIndexBucketName)
+		}
+
+		return nil
 	})
 }
 

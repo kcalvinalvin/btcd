@@ -602,12 +602,23 @@ func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan s
 		bucketName := make([][]byte, len(tlBucket)+1)
 		copy(bucketName, tlBucket)
 		bucketName[len(tlBucket)] = append([]byte(nil), subBucket...)
-		subBuckets = append(subBuckets, bucketName)
-		// Recurse sub-buckets to append to subBuckets slice.
+
+		// A prior drop attempt might have deleted the top-level
+		// bucket and then stopped, through a crash or a failed later
+		// transaction, before removing the in-progress drop flag.
+		// Treat a missing bucket as already deleted so this attempt
+		// can remove the flag.
 		bucket := dbTx.Metadata()
 		for _, subBucketName := range bucketName {
 			bucket = bucket.Bucket(subBucketName)
+			if bucket == nil {
+				return nil
+			}
 		}
+
+		// Append the existing bucket for later deletion and recurse
+		// through its sub-buckets.
+		subBuckets = append(subBuckets, bucketName)
 		return bucket.ForEachBucket(func(k []byte) error {
 			return subBucketClosure(dbTx, k, bucketName)
 		})
@@ -679,8 +690,8 @@ func dropIndex(db database.DB, idxKey []byte, idxName string, interrupt <-chan s
 		}
 	}
 
-	// Remove the index tip, index bucket, and in-progress drop flag now
-	// that all index entries have been removed.
+	// Remove the index tip and in-progress drop flag now that the index
+	// bucket and all of its entries have been removed.
 	err = db.Update(func(dbTx database.Tx) error {
 		meta := dbTx.Metadata()
 		indexesBucket := meta.Bucket(indexTipsBucketName)

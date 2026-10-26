@@ -94,3 +94,36 @@ func TestDropIndexNestedBuckets(t *testing.T) {
 	require.NoError(t, dropIndex(db, key, testDropIndexName, nil))
 	requireDropped(t, db, key)
 }
+
+// TestDropIndexFinishesWithoutBuckets resumes drops that stopped after the
+// index buckets were already deleted.
+func TestDropIndexFinishesWithoutBuckets(t *testing.T) {
+	tests := []struct {
+		name    string
+		idxKey  []byte
+		idxName string
+	}{
+		{"index_bucket", testDropIndexKey, testDropIndexName},
+		{"block_id_buckets", txIndexKey, txIndexName},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := createDropTestDB(t)
+			err := db.Update(func(dbTx database.Tx) error {
+				meta := dbTx.Metadata()
+				tips := meta.Bucket(indexTipsBucketName)
+				err := dbPutIndexerTip(dbTx, test.idxKey,
+					&chainhash.Hash{}, 0)
+				if err != nil {
+					return err
+				}
+				dropKey := indexDropKey(test.idxKey)
+				return tips.Put(dropKey, test.idxKey)
+			})
+			require.NoError(t, err)
+			err = dropIndex(db, test.idxKey, test.idxName, nil)
+			require.NoError(t, err)
+			requireDropped(t, db, test.idxKey)
+		})
+	}
+}
