@@ -9,9 +9,13 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/database"
 	_ "github.com/btcsuite/btcd/database/ffldb"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/stretchr/testify/require"
 )
 
 type bucketBase struct {
@@ -170,4 +174,101 @@ func TestDropIndexDeleteBucketError(t *testing.T) {
 	if !errors.Is(err, testErr) {
 		t.Fatalf("unexpected error: got %v, want %v", err, testErr)
 	}
+}
+
+// catchUpTestIndex is an index that counts the blocks connected to it.
+type catchUpTestIndex struct {
+	key       []byte
+	connected int
+}
+
+func (idx *catchUpTestIndex) Key() []byte {
+	return idx.key
+}
+
+func (idx *catchUpTestIndex) Name() string {
+	return string(idx.key)
+}
+
+func (idx *catchUpTestIndex) Create(database.Tx) error {
+	return nil
+}
+
+func (idx *catchUpTestIndex) Init() error {
+	return nil
+}
+
+func (idx *catchUpTestIndex) ConnectBlock(database.Tx, *btcutil.Block,
+	[]blockchain.SpentTxOut) error {
+
+	idx.connected++
+	return nil
+}
+
+func (idx *catchUpTestIndex) DisconnectBlock(database.Tx, *btcutil.Block,
+	[]blockchain.SpentTxOut) error {
+
+	return nil
+}
+
+// newManagerTestChain returns a database with a chain that holds only the
+// genesis block.
+func newManagerTestChain(t *testing.T) (database.DB, *blockchain.BlockChain) {
+	t.Helper()
+	db, err := database.Create(
+		"ffldb", filepath.Join(t.TempDir(), "db"), wire.MainNet,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	chain, err := blockchain.New(&blockchain.Config{
+		DB: db, ChainParams: &chaincfg.MainNetParams,
+		TimeSource: blockchain.NewMedianTime(),
+	})
+	require.NoError(t, err)
+	return db, chain
+}
+
+// fetchTestIndexTips returns the tip heights of the indexes with the passed
+// keys.
+func fetchTestIndexTips(db database.DB, keys ...[]byte) ([]int32, error) {
+	heights := make([]int32, len(keys))
+	err := db.View(func(dbTx database.Tx) error {
+		for i, key := range keys {
+			_, height, err := dbFetchIndexerTip(dbTx, key)
+			if err != nil {
+				return err
+			}
+			heights[i] = height
+		}
+		return nil
+	})
+	return heights, err
+}
+
+// TestManagerCatchUp ensures Manager.Init creates a missing index and connects
+// each block only to the indexes whose tips are behind it.
+func TestManagerCatchUp(t *testing.T) {
+	db, chain := newManagerTestChain(t)
+	caughtUp := &catchUpTestIndex{key: []byte("caughtup")}
+	behind := &catchUpTestIndex{key: []byte("behind")}
+	best := chain.BestSnapshot()
+	err := db.Update(func(dbTx database.Tx) error {
+		meta := dbTx.Metadata()
+		_, err := meta.CreateBucket(indexTipsBucketName)
+		if err != nil {
+			return err
+		}
+		return dbPutIndexerTip(
+			dbTx, caughtUp.key, &best.Hash, best.Height,
+		)
+	})
+	require.NoError(t, err)
+
+	manager := NewManager(db, []Indexer{caughtUp, behind})
+	require.NoError(t, manager.Init(chain, nil))
+	require.Zero(t, caughtUp.connected)
+	require.Equal(t, 1, behind.connected)
+	tips, err := fetchTestIndexTips(db, caughtUp.key, behind.key)
+	require.NoError(t, err)
+	require.Equal(t, []int32{best.Height, best.Height}, tips)
 }
