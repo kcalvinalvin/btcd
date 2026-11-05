@@ -1870,12 +1870,35 @@ type db struct {
 // Enforce db implements the database.DB interface.
 var _ database.DB = (*db)(nil)
 
+// Enforce db implements the optional database.Flusher interface.
+var _ database.Flusher = (*db)(nil)
+
 // Type returns the database driver type the current database instance was
 // created with.
 //
 // This function is part of the database.DB interface implementation.
 func (db *db) Type() string {
 	return dbType
+}
+
+// Flush forces pending writes to the database's backing store.
+//
+// This function is part of the optional database.Flusher interface
+// implementation.
+func (db *db) Flush() error {
+	db.writeLock.Lock()
+	defer db.writeLock.Unlock()
+
+	db.closeLock.RLock()
+	defer db.closeLock.RUnlock()
+	if db.closed {
+		return makeDbErr(database.ErrDbNotOpen, errDbNotOpenStr, nil)
+	}
+	if !db.cache.hasEntries() {
+		return nil
+	}
+
+	return db.cache.flush()
 }
 
 // begin is the implementation function for the Begin database method.  See its
